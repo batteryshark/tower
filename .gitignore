@@ -1,0 +1,16 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+*.token
+secrets/
+lead/
+dist/
+build/
+*.egg-info/
+.openchamber/
+# private project notes, never published
+PROJECT.md
+LEAD.md

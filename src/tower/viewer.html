@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Tower</title>
+<style>
+:root { --bg: #fff; --fg: #1c1d21; --muted: #6b6f78; --line: #e3e4e8; --card: #f6f7f9; --ok: #1a7f37; --warn: #9a6700; --bad: #c62828; --accent: #3b5bdb; }
+@media (prefers-color-scheme: dark) { :root { --bg: #15161a; --fg: #e6e7ea; --muted: #9a9ea8; --line: #2b2d33; --card: #1d1f24; --ok: #4ac26b; --warn: #d4a72c; --bad: #ef5350; --accent: #7b93ff; } }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+header { position: sticky; top: 0; z-index: 1; background: var(--bg); border-bottom: 1px solid var(--line); padding: 10px 12px 8px; padding-top: max(10px, env(safe-area-inset-top)); display: grid; gap: 8px; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+h1 { margin: 0; font-size: 16px; font-weight: 650; }
+.grow { flex: 1; min-width: 0; }
+input[type=text] { flex: 1; min-width: 10rem; font: 14px ui-monospace, SFMono-Regular, Menlo, monospace; padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--fg); }
+button { font: inherit; padding: 7px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--fg); cursor: pointer; }
+button.on { border-color: var(--accent); color: var(--accent); }
+label.check { display: inline-flex; gap: 5px; align-items: center; color: var(--muted); font-size: 13px; }
+.strip { display: flex; gap: 6px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+.pill { border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; white-space: nowrap; }
+.pill.ok { color: var(--ok); } .pill.warn { color: var(--warn); } .pill.bad { color: var(--bad); }
+#error { color: var(--bad); font-size: 13px; }
+#error:empty { display: none; }
+main { padding: 8px 12px 40px; padding-bottom: max(40px, env(safe-area-inset-bottom)); }
+#list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+#list li { border: 1px solid var(--line); border-radius: 10px; background: var(--card); }
+#list li.dlq { border-color: var(--bad); }
+#list li.new { animation: flash 1.2s ease-out; }
+@keyframes flash { from { background: color-mix(in srgb, var(--accent) 22%, var(--card)); } to { background: var(--card); } }
+details > summary { list-style: none; cursor: pointer; padding: 8px 10px; display: grid; gap: 2px; }
+details > summary::-webkit-details-marker { display: none; }
+.subject { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; font-weight: 600; }
+.meta { font-size: 12px; color: var(--muted); display: flex; gap: 10px; flex-wrap: wrap; }
+.preview { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+pre { margin: 0; padding: 8px 10px 10px; border-top: 1px solid var(--line); font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+#empty { color: var(--muted); padding: 24px 4px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <div class="row">
+    <h1>Tower</h1>
+    <span class="pill" id="conn">connecting</span>
+    <span class="grow"></span>
+    <button id="pause" type="button">Pause</button>
+    <button id="clear" type="button">Clear</button>
+  </div>
+  <form class="row" id="form">
+    <input type="text" id="filter" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Subject filter" placeholder="ev.>">
+    <label class="check"><input type="checkbox" id="dlq"> dead letters</label>
+    <button type="submit">Apply</button>
+  </form>
+  <div class="strip" id="strip"></div>
+  <div id="error"></div>
+</header>
+<main>
+  <ul id="list"></ul>
+  <div id="empty">Waiting for events…</div>
+</main>
+<script>
+"use strict";
+// Event data is untrusted: everything below is written with textContent, never innerHTML.
+const MAX_ROWS = 500;
+const $ = id => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+let filter = params.get("filter") || "ev.>";
+let dlq = params.get("dlq") === "1";
+let since = params.get("since") || "";
+let source = null, paused = false, held = [], firstOpen = true;
+
+$("filter").value = filter;
+$("dlq").checked = dlq;
+
+function el(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text != null) node.textContent = String(text);
+  return node;
+}
+
+function shortTime(iso) {
+  const d = new Date(iso);
+  return isNaN(d) ? String(iso || "") : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function preview(data) {
+  if (data === undefined) return "";
+  let text = typeof data === "string" ? data : JSON.stringify(data);
+  return text.length > 160 ? text.slice(0, 160) + "…" : text;
+}
+
+function setConn(text, tone) {
+  const pill = $("conn");
+  pill.textContent = text;
+  pill.className = "pill " + (tone || "");
+}
+
+function render(item, fresh) {
+  const ev = item.event || {};
+  const li = el("li", item.stream === "TOWER_DLQ" ? "dlq" : "");
+  if (fresh) li.classList.add("new");
+  const details = el("details");
+  const summary = el("summary");
+  summary.append(el("div", "subject", item.subject));
+  const meta = el("div", "meta");
+  meta.append(el("span", "", shortTime(ev.time || item.received)));
+  if (ev.source) meta.append(el("span", "", ev.source));
+  meta.append(el("span", "", (item.stream === "TOWER_DLQ" ? "dlq #" : "#") + item.seq));
+  summary.append(meta);
+  const p = preview(ev.data !== undefined ? ev.data : ev.raw);
+  if (p) summary.append(el("div", "preview", p));
+  details.append(summary);
+  details.addEventListener("toggle", () => {
+    if (details.open && !details.querySelector("pre")) details.append(el("pre", "", JSON.stringify(item, null, 2)));
+  }, { once: false });
+  li.append(details);
+  const list = $("list");
+  list.insertBefore(li, list.firstChild);
+  while (list.children.length > MAX_ROWS) list.removeChild(list.lastChild);
+  $("empty").hidden = true;
+}
+
+function connect() {
+  if (source) source.close();
+  const q = new URLSearchParams({ filter });
+  if (dlq) q.set("dlq", "1");
+  if (since) q.set("since", since);
+  setConn("connecting", "warn");
+  source = new EventSource("events?" + q.toString());
+  source.onopen = () => { setConn(paused ? "paused" : "live", paused ? "warn" : "ok"); $("error").textContent = ""; };
+  source.onerror = () => {
+    if (source.readyState === EventSource.CLOSED) {
+      setConn("stopped", "bad");
+      $("error").textContent = "The stream was refused (bad filter, or the host is down). Fix the filter and Apply, or reload.";
+    } else {
+      setConn("reconnecting", "warn");
+    }
+  };
+  source.addEventListener("tower", e => {
+    let item;
+    try { item = JSON.parse(e.data); } catch { return; }
+    if (paused) { held.push(item); $("pause").textContent = "Resume (" + held.length + ")"; return; }
+    render(item, true);
+  });
+}
+
+$("form").addEventListener("submit", e => {
+  e.preventDefault();
+  filter = $("filter").value.trim() || "ev.>";
+  dlq = $("dlq").checked;
+  const q = new URLSearchParams({ filter });
+  if (dlq) q.set("dlq", "1");
+  if (since) q.set("since", since);
+  history.replaceState(null, "", "?" + q.toString());
+  $("list").replaceChildren();
+  $("empty").hidden = false;
+  held = [];
+  connect();
+});
+
+$("pause").addEventListener("click", () => {
+  paused = !paused;
+  $("pause").classList.toggle("on", paused);
+  if (!paused) {
+    held.forEach(item => render(item, false));
+    held = [];
+    $("pause").textContent = "Pause";
+    setConn("live", "ok");
+  } else {
+    $("pause").textContent = "Resume (0)";
+    setConn("paused", "warn");
+  }
+});
+
+$("clear").addEventListener("click", () => { $("list").replaceChildren(); $("empty").hidden = false; });
+
+async function refreshStatus() {
+  const strip = $("strip");
+  try {
+    const r = await fetch("status", { cache: "no-store" });
+    const s = await r.json();
+    const pills = [];
+    pills.push([ "bus " + s.nats, s.nats === "connected" ? "ok" : "bad" ]);
+    for (const [name, h] of Object.entries(s.handlers || {})) {
+      const tone = h.state === "running" ? "ok" : (h.state === "failed" ? "bad" : "warn");
+      let text = name + " " + h.state;
+      if (h.kind === "handler") text += " · " + (h.handled || 0);
+      if (h.dead_lettered) text += " · " + h.dead_lettered + " dlq";
+      pills.push([text, tone, h.last_error || ""]);
+    }
+    if (s.load_errors) pills.push([s.load_errors + " load errors", "bad"]);
+    pills.push(["dead letters " + (s.dead_letters == null ? "?" : s.dead_letters), s.dead_letters ? "warn" : ""]);
+    strip.replaceChildren(...pills.map(([text, tone, title]) => {
+      const pill = el("span", "pill " + tone, text);
+      if (title) pill.title = title;
+      return pill;
+    }));
+  } catch {
+    strip.replaceChildren(el("span", "pill bad", "host unreachable"));
+  }
+}
+
+connect();
+refreshStatus();
+setInterval(refreshStatus, 10000);
+</script>
+</body>
+</html>

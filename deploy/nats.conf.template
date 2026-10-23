@@ -1,0 +1,17 @@
+# Tower NATS server config. Installed to ~/.tower/nats/nats.conf by scripts/setup-nats.sh.
+# Loopback only; tailnet clients come in through `tailscale serve --tcp 4222`.
+# The token lives in auth.conf next to this file (0600, generated, never in the repo).
+
+server_name: tower
+listen: 127.0.0.1:4222
+http: 127.0.0.1:8222
+
+max_payload: 1MB
+
+jetstream {
+  store_dir: "@STORE_DIR@"
+  max_file_store: 10GB
+  max_memory_store: 256MB
+}
+
+include ./auth.conf
