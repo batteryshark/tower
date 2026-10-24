@@ -174,7 +174,17 @@ class Projects:
         path = Path(self.manifest)
         data = json.loads(read_file(path.parent, path.name, {'.json'}))
         schema.version(data)
-        schema.keys(data, 'version projects')
+        schema.keys(data, 'version projects inventory')
+        error = ''
+        if 'inventory' in data:
+            inventory = data['inventory']
+            schema.keys(inventory, 'complete observed_at provenance answers_available')
+            if type(inventory.get('complete')) is not bool: raise ValueError('invalid inventory')
+            schema.time(inventory.get('observed_at')); schema.text(inventory.get('provenance'),500)
+            if not inventory['complete']: error = 'Project inventory incomplete — retained safe rows may be stale.'
+            if 'answers_available' in inventory:
+                if type(inventory['answers_available']) is not bool: raise ValueError('invalid answer availability')
+                if not inventory['answers_available']: error += ' Answer source unavailable — previous verified activity retained.'
         schema.seq(data.get('projects'), 1000)
         ids = set()
         projects = []
@@ -188,7 +198,7 @@ class Projects:
             except (ValueError, TypeError, RecursionError):
                 # Retain an explicit unavailable row, but no file/export access.
                 projects.append({'id': '', 'title': 'Unavailable project entry', '_invalid': True})
-        return projects, ''
+        return projects, error
 
     def projection(self, p):
         try:
@@ -201,7 +211,7 @@ class Projects:
     def activity(self, p, data):
         return [e for e in data.get('activity', [])[:500] if isinstance(e, dict)
                 and e.get('project_id') == p['id'] and e.get('outcome_id') == p['outcome_id']
-                and e.get('id') and e.get('kind') in ('landing', 'acceptance', 'decision', 'handoff', 'status')
+                and e.get('id') and e.get('kind') in ('landing', 'acceptance', 'decision', 'handoff', 'status', 'file')
                 and stamp(e.get('at')) and e.get('provenance') and e.get('reference')]
 
     def summary(self, p, data):
@@ -274,12 +284,20 @@ class Projects:
 
     def last_activity(self, p, data):
         times = [e['at'] for e in self.activity(p, data)]
+        times.extend(f['at'] for f in data.get('file_updates', []))
         if data.get('file_update'):
             times.append(data['file_update']['at'])
         answer = data.get('acceptance', {}).get('answer')
         if answer:
             times.append(answer['answered_at'])
         return max(times, key=stamp, default=None)
+
+    def runtime_state(self, data, now=None):
+        now = now or datetime.now(timezone.utc)
+        runtime = data.get('runtime', {})
+        sample = stamp(runtime.get('at'))
+        return 'running' if (runtime.get('state') == 'running' and runtime.get('provenance') == 'docket.running_sample'
+                             and sample and 0 <= (now-sample).total_seconds() <= 120) else 'unknown'
 
     def overview(self, rows, query, now=None):
         """Pure bounded partition; runtime unknown is never interpreted as busy."""
@@ -292,8 +310,7 @@ class Projects:
         selected = []
         for p, data, unavailable in rows:
             last = self.last_activity(p, data)
-            runtime = data.get('runtime', {})
-            running = runtime.get('state') == 'running'
+            running = self.runtime_state(data, now) == 'running'
             flight = running or bool(last and now - timedelta(hours=48) <= stamp(last) <= now)
             if flight == (tab == 'flight') and (tab != 'else' or search.casefold() in p['title'].casefold()):
                 selected.append((p, data, unavailable))
@@ -391,7 +408,9 @@ class Projects:
                         body += '<p role="status">Source changed. The owner must shorten its plain progress header.</p>'
                     body += '<details><summary>Project details</summary>'
                     body += '<p>' + esc(fields['_source']) + ' · outcome ' + esc(p['outcome_id']) + '</p>'
-                    body += '<p>Lead runtime: ' + esc(data.get('runtime', {}).get('state', 'unknown')) + '</p>'
+                    body += '<p>Lead runtime: ' + esc(self.runtime_state(data)) + '</p>'
+                    if data.get('runtime',{}).get('provenance')=='docket.running_sample':
+                        body += relative_time(data['runtime']['at'], 'Busy sample ') + '<p>docket.running_sample</p>'
                     for key in ('usable now', 'left', 'waiting on', 'handed to'):
                         if fields.get(key):
                             body += '<p><b>' + esc(key.capitalize()) + ':</b> ' + esc(fields[key]) + '</p>'
@@ -422,7 +441,7 @@ class Projects:
                 if len(seen) == 4:
                     body += '<details><summary>More activity</summary>'
                     more_activity = True
-                body += '<section class="activity"><b>' + esc(e['project_title']) + '</b> · ' + esc({'landing': 'Landed', 'acceptance': 'Acceptance', 'decision': 'Decision', 'handoff': 'Handoff', 'status': 'Status observed'}[e['kind']]) + ' · ' + relative_time(e['at']) + '<p>' + esc(compact(e.get('label'))) + '</p><details><summary>Event details</summary><p>' + esc(e.get('label')) + '</p><small>' + esc(e['reference']) + ' · ' + esc(e['provenance']) + '</small></details></section>'
+                body += '<section class="activity"><b>' + esc(e['project_title']) + '</b> · ' + esc({'landing': 'Landed', 'acceptance': 'Acceptance', 'decision': 'Decision', 'handoff': 'Handoff', 'status': 'Status observed', 'file': 'File update'}[e['kind']]) + ' · ' + relative_time(e['at']) + '<p>' + esc(compact(e.get('label'))) + '</p><details><summary>Event details</summary><p>' + esc(e.get('label')) + '</p><small>' + esc(e['reference']) + ' · ' + esc(e['provenance']) + '</small></details></section>'
             if more_activity:
                 body += '</details>'
             css = Path(__file__).with_name('viewer.html').read_text().split('<style>')[1].split('</style>')[0]

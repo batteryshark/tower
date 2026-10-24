@@ -22,7 +22,7 @@ async def test_500_partition_order_search_pages(tmp_path):
         data = dict(version=1, project_id=p['id'], outcome_id='o', generated_at=now.isoformat(),
                     file_update=dict(at=at, reference='Approved file', provenance='Source timestamp'))
         if i == 499:
-            data['runtime'] = dict(state='running', at=now.isoformat(), reference='Runtime observation', provenance='Supported owner input')
+            data['runtime'] = dict(state='running', at=now.isoformat(), reference='ses_fixture', provenance='docket.running_sample')
         schema.projection(data, p)
         rows.append((p, data, ''))
     flight = pages.overview(rows, {}, now)

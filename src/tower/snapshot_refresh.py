@@ -83,9 +83,9 @@ async def invoke(config, payload):
         schema.keys(result,'version refreshed stale_sources redactions')
         if 'redactions' in result and (type(result['redactions']) is not int or result['redactions'] < 0):
             raise ValueError('refresh redaction count invalid')
-        if type(result.get('version')) is not int or result['version'] != 1 or type(result.get('refreshed')) is not int or not 0 <= result['refreshed'] <= 100:
+        if type(result.get('version')) is not int or result['version'] != 1 or type(result.get('refreshed')) is not int or not 0 <= result['refreshed'] <= 1000:
             raise ValueError('refresh result invalid')
-        for pid in schema.seq(result.get('stale_sources'),100): schema.ident(pid)
+        for pid in schema.seq(result.get('stale_sources'),1000): schema.ident(pid)
         return result
     try:
         return await asyncio.wait_for(bounded(),timeout=60)

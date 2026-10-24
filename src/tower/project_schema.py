@@ -39,7 +39,7 @@ def ident(value):
 def stamp(value):
     try:
         text(value, 40)
-        if not re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?(?:Z|[+-]\d\d:\d\d)', value):
+        if not re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?(?:Z|[+-]\d\d:\d\d)', value):
             return None
         parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
         return parsed if 2000 <= parsed.year <= 2100 else None
@@ -123,7 +123,7 @@ def bound(data, p):
 def projection(data, p):
     json_depth(data)
     version(data)
-    keys(data, 'version project_id outcome_id generated_at summary knowledge acceptance activity status_observation runtime file_update')
+    keys(data, 'version project_id outcome_id generated_at summary knowledge acceptance activity status_observation runtime file_update file_updates')
     bound(data, p)
     generated = time(data.get('generated_at'))
     for name in ('status_observation', 'runtime', 'file_update'):
@@ -138,8 +138,17 @@ def projection(data, p):
             ident(s.get('id')); text(s.get('text'), 80)
             if s['text'] != s['text'].strip() or any(ord(c) < 32 for c in s['text']):
                 raise ValueError('invalid status')
-        if name == 'runtime' and s.get('state') not in ('running', 'idle', 'unknown'):
-            raise ValueError('invalid runtime state')
+        if name == 'runtime':
+            if s.get('state') not in ('running', 'unknown'):
+                raise ValueError('invalid runtime state')
+            if s['state']=='running' and (s['provenance']!='docket.running_sample' or not ident(s['reference']).startswith('ses_')):
+                raise ValueError('unverified busy sample')
+    files=set()
+    for f in seq(data.get('file_updates', []), 100):
+        keys(f,'id at reference provenance'); fid=ident(f.get('id')); evidence(f)
+        if fid in files or time(f.get('at'))>generated:
+            raise ValueError('invalid file update')
+        files.add(fid)
     if 'summary' in data:
         s = obj(data['summary'])
         if set(s) - {'observed_at', 'provenance', 'reference', 'usable now', 'left', 'waiting on', 'handed to', 'needs_you'}:
@@ -219,7 +228,7 @@ def projection(data, p):
         bound(e, p)
         evidence(e)
         eid = ident(e.get('id'))
-        if eid in ids or e.get('kind') not in ('landing', 'acceptance', 'decision', 'handoff', 'status'):
+        if eid in ids or e.get('kind') not in ('landing', 'acceptance', 'decision', 'handoff', 'status', 'file'):
             raise ValueError('invalid/duplicate activity')
         ids.add(eid)
         text(e.get('label'), 500)
