@@ -146,7 +146,7 @@ class Projects:
 
     def load(self):
         if not self.manifest:
-            return [], 'Project manifest unavailable — operator configuration required.'
+            return [], 'Project manifest unavailable — the project owner must configure its shared snapshot.'
         path = Path(self.manifest)
         data = json.loads(read_file(path.parent, path.name, {'.json'}))
         schema.version(data)
@@ -172,7 +172,7 @@ class Projects:
             data = json.loads(read_file(e['root'], e['path'], {'.json'}))
             return schema.projection(data, p), ''
         except (KeyError, ValueError, OSError, TypeError, UnicodeError, RecursionError):
-            return {}, 'Knowledge / acceptance projection unavailable or invalid.'
+            return {}, 'Knowledge / acceptance snapshot unavailable: missing, unreadable or invalid. The project owner must refresh or configure its shared snapshot.'
 
     def activity(self, p, data):
         return [e for e in data.get('activity', [])[:500] if isinstance(e, dict)
@@ -205,6 +205,33 @@ class Projects:
         fields['status'] = p.get('status', 'unreported')
         fields['last landed'] = max((e['at'] for e in self.activity(p, data) if e['kind'] == 'landing'), key=stamp, default='Unreported')
         return fields
+
+    def acceptance(self, data):
+        """Plain evidence from a validated snapshot, never an inferred answer."""
+        a = data.get('acceptance', {})
+        states = {'unfinished': 'Not finished', 'finished-awaiting-acceptance': 'Finished; awaiting acceptance',
+                  'accepted': 'Accepted', 'not-yet': 'Not yet accepted'}
+        request_states = {'none': 'Not requested', 'pending': 'Awaiting answer',
+                          'expired': 'Expired', 'cancelled': 'Cancelled', 'answered': 'Answered'}
+        answer = a.get('answer') or {}
+        pairs = [('State', states.get(a.get('state'), 'Unreported')),
+                 ('Request', request_states.get(a.get('request_state'), 'Unreported')),
+                 ('Requested at', a.get('requested_at', 'Unreported')),
+                 ('Actual answer', answer.get('value', 'No answer reported')),
+                 ('Answered at', answer.get('answered_at', 'Unreported')),
+                 ('Source', ' · '.join(filter(None, (a.get('provenance'), a.get('reference')))) or 'Unreported'),
+                 ('Answer source', ' · '.join(filter(None, (answer.get('provenance'), answer.get('reference')))) or 'Unreported')]
+        return '<h2>Acceptance</h2><dl>' + ''.join(
+            f'<div><dt>{esc(k)}</dt><dd>{esc(v)}</dd></div>' for k, v in pairs
+        ) + '</dl><details><summary>Acceptance technical details</summary><pre>' + esc(json.dumps(a, indent=2)) + '</pre></details>'
+
+    def file_selection(self, p, chosen):
+        options = [(f['id'], f['label']) for f in p.get('files', [])] + [('knowledge', 'Knowledge notes / todos / plans')]
+        chosen = chosen or options[0][0]
+        label = next((label for fid, label in options if fid == chosen), None)
+        if label is None:
+            raise web.HTTPNotFound()
+        return options, chosen, label
 
     def install(self, app):
         app.router.add_get('/tower/projects', self.redirect, allow_head=False)
@@ -247,10 +274,15 @@ class Projects:
     async def page(self, request):
         try:
             projects, error, selected = self.selected(request)
+            title = 'Tower projects'
+            if selected:
+                _, _, label = self.file_selection(selected, request.query.get('file'))
+                title = selected['title'] + ' · ' + label + ' · Tower'
             body, feed = (f'<p>{esc(error)}</p>' if error else ''), []
+            body += '<p>Shared snapshots, not live status. As-of times are reported by the source; local headers may take priority.</p>'
             for p in ([selected] if selected else projects):
                 if p.get('_invalid'):
-                    body += '<section class="project-row">Unavailable project entry — malformed configuration.</section>'
+                    body += '<section class="project-row">Project information unavailable: malformed configuration. The project owner must configure its shared snapshot.</section>'
                     continue
                 data, unavailable = self.projection(p)
                 fields = self.summary(p, data)
@@ -259,13 +291,18 @@ class Projects:
                     body += '<dl>'
                 for key in ('status', 'usable now', 'left', 'waiting on', 'acceptance', 'handed to', 'last landed'):
                     value = fields.get(key)
+                    if key == 'acceptance':
+                        value = {'unfinished': 'Not finished', 'finished-awaiting-acceptance': 'Finished; awaiting acceptance', 'accepted': 'Accepted', 'not-yet': 'Not yet accepted', 'unreported': 'Unreported'}.get(value, 'Unreported')
                     if selected:
                         body += f'<div><dt>{esc(key)}</dt><dd>{esc(value)}</dd></div>'
                     else:
                         excerpt = str(value if value is not None else 'Unreported')
                         body += f'<span class="summary-cell" title="{esc(excerpt)}"><b>{esc(key)}:</b> {esc(excerpt[:100])}' + ('…' if len(excerpt) > 100 else '') + '</span>'
                 if selected:
-                    body += '</dl><small>' + esc(fields['_source']) + ' · outcome ' + esc(p['outcome_id']) + ' · projection as of ' + esc(data.get('generated_at')) + '</small>'
+                    body += '</dl>'
+                body += '<small>Snapshot as of: ' + esc(data.get('generated_at', 'Unavailable')) + '</small>'
+                if selected:
+                    body += '<small>' + esc(fields['_source']) + ' · outcome ' + esc(p['outcome_id']) + '</small>'
                 body += '</section>'
                 if unavailable and not selected:
                     body += '<small>' + esc(p['title']) + ': ' + esc(unavailable) + '</small>'
@@ -273,7 +310,7 @@ class Projects:
                 if selected:
                     body += f'<p role="status">{esc(unavailable)}</p>' if unavailable else ''
                     body += self.files(p, data, request.query.get('file'))
-                    body += '<h3>Acceptance provenance</h3><pre>' + esc(json.dumps(data.get('acceptance', {}), indent=2)) + '</pre>'
+                    body += self.acceptance(data)
             now = datetime.now(timezone.utc)
             body += '<h2>Recent activity · last 6 hours</h2><p>Factual source timestamps; no file-mtime inference.</p>'
             recent = sorted((e for e in feed if now-timedelta(hours=6) <= stamp(e['at']) <= now), key=lambda e: stamp(e['at']), reverse=True)
@@ -289,25 +326,27 @@ class Projects:
             css = Path(__file__).with_name('viewer.html').read_text().split('<style>')[1].split('</style>')[0]
             css += 'a{color:var(--accent)} section{background:var(--card);padding:12px;border-radius:10px;margin:8px 0} dl{margin:0} dl>div{display:grid;grid-template-columns:9rem 1fr;gap:8px} dt{color:var(--muted)} dd{margin:0} p,dd,small{overflow-wrap:anywhere} img{max-width:100%;height:auto} select{max-width:100%;font:inherit} article{min-width:0} @media(max-width:420px){dl>div{grid-template-columns:6rem 1fr}}'
             css += '.project-row{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline}.project-name{font-weight:650}.summary-cell{font-size:12px;overflow-wrap:anywhere;min-width:0}.project-row dl,.project-row small{width:100%}.table-scroll{overflow-x:auto}table{border-collapse:collapse}td,th{padding:4px 8px;border:1px solid var(--line)}article p{margin:6px 0}'
-            document = '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Tower projects</title><style>' + css + '</style><header><h1>Tower projects</h1><nav><a href="/tower/">Events</a> · <a href="/tower/projects/">All projects</a></nav></header><main>' + body + '</main></html>'
+            css += 'header,main,section,form,dl,dd{min-width:0} h1,a,label,article{overflow-wrap:anywhere} nav{display:flex;flex-wrap:wrap;gap:8px} nav a,.project-name{display:inline-flex;align-items:center;min-height:44px;min-width:44px;padding:8px;max-width:100%} a:focus-visible,select:focus-visible,button:focus-visible,summary:focus-visible{outline:3px solid var(--accent);outline-offset:2px} form{display:flex;flex-wrap:wrap;align-items:end;gap:8px;margin:12px 0} form label{display:grid;gap:4px;min-width:0;max-width:100%;flex:1 1 12rem} select,button{min-height:44px;min-width:44px} select{width:100%;background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px} details>summary{display:list-item;min-height:44px;padding:12px;overflow-wrap:anywhere} .project-row{align-items:center}'
+            document = '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + esc(title) + '</title><style>' + css + '</style><header><h1>' + esc(title) + '</h1><nav aria-label="Tower"><a href="/tower/">Events</a><a href="/tower/projects/">All projects</a></nav></header><main>' + body + '</main></html>'
             if len(document.encode()) > 2 * 1024 * 1024:
                 raise ValueError('response too large')
             return web.Response(text=document, content_type='text/html', headers=HEADERS)
         except (KeyError, ValueError, OSError, TypeError, UnicodeError, RecursionError):
-            return web.Response(text='Project configuration unavailable or invalid.', status=503, headers=HEADERS)
+            return web.Response(text='Project information unavailable: configuration missing, unreadable or invalid. The project owner must refresh or configure its shared snapshot.', status=503, headers=HEADERS)
 
     def files(self, p, data, chosen):
         files = p.get('files', [])
         knowledge = data.get('knowledge', {})
         entries = knowledge.get('items', [])[:200] if knowledge.get('state') == 'available' else []
-        options = [(f['id'], f['label']) for f in files] + [('knowledge', 'Knowledge notes / todos / plans')]
-        chosen = chosen or options[0][0]
+        options, chosen, label = self.file_selection(p, chosen)
         body = '<form method="get"><label>File <select name="file">'
         for fid, label in options:
             body += f'<option value="{esc(fid)}"' + (' selected' if fid == chosen else '') + '>' + esc(label) + '</option>'
         body += '</select></label> <button>Open</button></form><article>'
         if chosen == 'knowledge':
             body += '<h2>Knowledge</h2><p>' + esc(knowledge.get('state', 'unavailable')) + ' · ' + esc(knowledge.get('provenance')) + '</p>'
+            if knowledge.get('state') != 'available':
+                body += '<p>Knowledge unavailable: no available knowledge snapshot was reported. The project owner must refresh its shared snapshot.</p>'
             for item in entries:
                 body += '<h3>' + esc(item.get('title')) + '</h3><small>ID ' + esc(item.get('id')) + ' · ' + esc(item.get('kind')) + ' · completed: ' + esc(item.get('completed')) + '</small>' + markdown(str(item.get('body', ''))[:50000], {})
         else:
@@ -325,5 +364,5 @@ class Projects:
                         images[rel] = f'/tower/projects/{p["id"]}/images/{image["id"]}'
                 body += markdown(read_file(root, f['path'], {'.md'}).decode(), images)
             except (ValueError, OSError, UnicodeError):
-                body += '<p>Selected file unavailable or not permitted.</p>'
+                body += '<p>Selected file unavailable: missing, unreadable or not permitted. The project owner must restore or configure the shared document.</p>'
         return body + '</article>'

@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 from aiohttp import web
@@ -84,3 +85,55 @@ async def test_unconfigured():
     Projects().install(app)
     async with TestClient(TestServer(app)) as client:
         assert 'manifest unavailable' in await (await client.get('/tower/projects/')).text()
+
+
+async def test_snapshot_controls_and_selection_source(fixture):
+    """Markup/CSS contracts only: not rendered phone or keyboard proof."""
+    pages, p, data = fixture
+    app = web.Application()
+    pages.install(app)
+    async with TestClient(TestServer(app)) as client:
+        overview = await (await client.get('/tower/projects/')).text()
+        assert 'Shared snapshots, not live status' in overview
+        assert 'Snapshot as of: ' + data['generated_at'] in overview
+        for query, label in [('', 'LEAD.md'), ('?file=knowledge', 'Knowledge notes / todos / plans')]:
+            body = await (await client.get('/tower/projects/p_demo' + query)).text()
+            assert f'<title>Demo · {label} · Tower</title>' in body
+            assert f'<h1>Demo · {label} · Tower</h1>' in body
+            assert 'method="get"' in body and '<button>Open</button>' in body
+            assert 'min-height:44px' in body and 'min-width:44px' in body
+            assert 'a:focus-visible,select:focus-visible,button:focus-visible,summary:focus-visible' in body
+            assert 'outline:3px solid var(--accent)' in body
+            assert 'flex-wrap:wrap' in body and 'min-width:0' in body
+            assert '<details><summary>Acceptance technical details</summary>' in body
+            assert '<dt>Actual answer</dt><dd>No answer reported</dd>' in body
+        p_root = Path(p['root'])
+        p_root.joinpath('projection.json').unlink()
+        body = await (await client.get('/tower/projects/')).text()
+        assert 'Snapshot as of: Unavailable' in body
+        assert 'missing, unreadable or invalid' in body and 'project owner must refresh or configure' in body
+        body = await (await client.get('/tower/projects/p_demo?file=knowledge')).text()
+        assert 'Knowledge unavailable:' in body
+        p_root.joinpath('LEAD.md').unlink()
+        body = await (await client.get('/tower/projects/p_demo')).text()
+        assert 'project owner must restore or configure the shared document' in body
+
+
+@pytest.mark.parametrize('state,value,label', [('accepted', 'Accept', 'Accepted'), ('not-yet', 'Not yet', 'Not yet accepted')])
+async def test_plain_acceptance_evidence(fixture, state, value, label):
+    pages, p, data = fixture
+    data['acceptance'] = dict(project_id=p['id'], outcome_id=p['outcome_id'], state=state,
+        request_state='answered', request_id='r', requested_at=data['generated_at'], provenance='Nod', reference='request',
+        answer=dict(type='nod.answer', id='a', project_id=p['id'], outcome_id=p['outcome_id'], request_id='r',
+                    value=value, answered_at=data['generated_at'], provenance='Nod answer', reference='answer'))
+    Path(p['root'], 'projection.json').write_text(json.dumps(data))
+    app = web.Application()
+    pages.install(app)
+    async with TestClient(TestServer(app)) as client:
+        body = await (await client.get('/tower/projects/p_demo')).text()
+        assert f'<dt>State</dt><dd>{label}</dd>' in body
+        assert f'<dt>Actual answer</dt><dd>{value}</dd>' in body
+        assert '<dt>Requested at</dt><dd>' + data['generated_at'] in body
+        assert '<dt>Answered at</dt><dd>' + data['generated_at'] in body
+        assert '<dt>Source</dt><dd>Nod · request</dd>' in body
+        assert '<dt>Answer source</dt><dd>Nod answer · answer</dd>' in body

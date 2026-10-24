@@ -37,13 +37,15 @@ details > summary::-webkit-details-marker { display: none; }
 .preview { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 pre { margin: 0; padding: 8px 10px 10px; border-top: 1px solid var(--line); font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 #empty { color: var(--muted); padding: 24px 4px; text-align: center; }
+.projects-nav { display: inline-flex; align-items: center; min-height: 44px; min-width: 44px; padding: 8px; color: var(--accent); }
+.projects-nav:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 </style>
 </head>
 <body>
 <header>
   <div class="row">
     <h1>Tower</h1>
-    <a href="projects/" style="color:var(--accent)">Projects</a>
+    <a href="projects/" class="projects-nav">Projects</a>
     <span class="pill" id="conn">connecting</span>
     <span class="grow"></span>
     <button id="pause" type="button">Pause</button>

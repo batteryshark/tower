@@ -59,7 +59,7 @@ async def test_bad_export_isolated(tmp_path, field, value):
         response = await client.get('/tower/projects/')
         body = await response.text()
         assert response.status == 200 and 'Project One' in body and 'Project Two' in body
-        assert 'projection unavailable or invalid' in body and '<b>acceptance:</b> accepted' not in body
+        assert 'snapshot unavailable: missing, unreadable or invalid' in body and '<b>acceptance:</b> Accepted' not in body
 
 
 @pytest.mark.parametrize('key,value', [('request_id', 'wrong'), ('project_id', 'wrong'), ('outcome_id', 'old'),
@@ -105,7 +105,7 @@ async def test_invalid_utf8_export_isolated(tmp_path):
         response = await client.get('/tower/projects/')
         body = await response.text()
         assert response.status == 200
-        assert 'Project One' in body and 'projection unavailable or invalid' in body
+        assert 'Project One' in body and 'snapshot unavailable: missing, unreadable or invalid' in body
         assert 'Valid Project' in body and 'GOOD PROJECT CONTENT' in body
 
 
@@ -126,8 +126,8 @@ async def test_deep_json_and_bad_manifest_entry(tmp_path):
     async with TestClient(TestServer(app)) as client:
         response = await client.get('/tower/projects/')
         body = await response.text()
-        assert response.status == 200 and body.count('Unavailable project entry') == 2
-        assert 'Project One' in body and 'projection unavailable or invalid' in body
+        assert response.status == 200 and body.count('Project information unavailable: malformed configuration') == 2
+        assert 'Project One' in body and 'snapshot unavailable: missing, unreadable or invalid' in body
 
 
 async def test_image_routes_summary_and_activity(tmp_path):
@@ -148,7 +148,7 @@ async def test_image_routes_summary_and_activity(tmp_path):
         for name in ('escape', 'svg', 'link', 'unlisted', '%2e%2e%2foutside.png'):
             assert (await client.get('/tower/projects/p1/images/' + name)).status == 404
         overview = await (await client.get('/tower/projects/')).text()
-        assert '<b>acceptance:</b> accepted' in overview and 'Project One · landing' in overview
+        assert '<b>acceptance:</b> Accepted' in overview and 'Project One · landing' in overview
         assert 'Actual source landing' in overview
     data['summary']['usable now'] = 'x' * 2001
     with pytest.raises(ValueError):
