@@ -44,13 +44,14 @@ from nats.js import JetStreamContext
 from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
 
 from . import bus, events
+from . import ledger as _ledger
 from . import waker as _waker
 
 DEFAULT_MAX_DELIVER = 5
 DEFAULT_BACKOFF = (5, 30, 120, 600)
 DEFAULT_ACK_WAIT = 300
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
-STATE_ROOT = Path("~/.tower/state")
+STATE_ROOT = Path(os.environ.get("TOWER_STATE_DIR") or "~/.tower/state")
 
 
 class Retry(Exception):
@@ -132,6 +133,11 @@ class Context:
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
         return path
 
+    @property
+    def ledger(self) -> _ledger.HandlerLedger:
+        """The persistent (source, event id) ledger, bound to this handler (tower.ledger)."""
+        return shared_ledger(self.state_root).bind(self.name)
+
     async def publish(
         self,
         type: str,
@@ -166,6 +172,17 @@ class Context:
                 except events.EventError:
                     event = None
                 yield event, msg
+
+
+_LEDGERS: dict[str, _ledger.Ledger] = {}
+
+
+def shared_ledger(state_root: Path | str = STATE_ROOT) -> _ledger.Ledger:
+    """One open ledger file per state root, shared by every handler in the process."""
+    key = os.path.realpath(os.path.expanduser(str(state_root)))
+    if key not in _LEDGERS:
+        _LEDGERS[key] = _ledger.Ledger.under(key)
+    return _LEDGERS[key]
 
 
 async def ensure_consumer(
