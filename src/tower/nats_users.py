@@ -317,7 +317,11 @@ async def verify(paths: Paths, stage: str = "s1", *, url: str | None = None,
             await nc.close()
             ok = done("token refused", False, "a token connection was accepted")
         except Exception as exc:  # noqa: BLE001
-            ok = done("token refused", True, exc.__class__.__name__)
+            # Only a real authorization denial proves the token is refused; anything else is unknown.
+            if is_auth_denial(exc):
+                ok = done("token refused", True, "Authorization Violation")
+            else:
+                ok = done("token refused", False, f"unknown: {exc.__class__.__name__} (not an authorization denial)")
     if not ok:
         return results
 
@@ -358,6 +362,16 @@ async def verify(paths: Paths, stage: str = "s1", *, url: str | None = None,
     done("active users", not problems,
          f"{','.join(active) or '-'} active, {len(conns)} connections" + (f": {'; '.join(problems)}" if problems else ""))
     return results
+
+
+def is_auth_denial(exc: BaseException) -> bool:
+    """True only for NATS refusing the credentials: AuthorizationError, or the plain nats.errors.Error that nats-py
+    raises for the server's -ERR 'Authorization Violation'. Timeouts, resets and OSErrors are not."""
+    import nats.errors
+
+    if isinstance(exc, nats.errors.AuthorizationError):
+        return True
+    return type(exc) is nats.errors.Error and "authorization violation" in str(exc).lower()
 
 
 async def _quiet(exc: Exception) -> None:

@@ -422,7 +422,7 @@ async def test_connect_with_user_password_file(user_bus, tmp_path, monkeypatch):
     token.write_text("not-used\n")
     monkeypatch.setenv("TOWER_NATS_USER", "nod")
     monkeypatch.setenv("TOWER_NATS_PASSWORD_FILE", str(password))
-    nc = await bus.connect(user_bus, str(token))
+    nc = await bus.connect(user_bus)  # env user; an explicit token file would win over it
     assert nc.is_connected
     await nc.close()
 
@@ -434,4 +434,4 @@ async def test_token_stays_default_and_user_needs_password(user_bus, tmp_path, m
         await asyncio.wait_for(bus.connect(user_bus, str(token), allow_reconnect=False), 10)
     monkeypatch.setenv("TOWER_NATS_USER", "nod")
     with pytest.raises(ValueError, match="TOWER_NATS_PASSWORD_FILE"):
-        await bus.connect(user_bus, str(token))
+        await bus.connect(user_bus)

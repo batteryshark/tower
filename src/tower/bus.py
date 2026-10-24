@@ -8,8 +8,8 @@ Environment:
     TOWER_NATS_CLIENT_CONFIG  the client pointer, default ~/.tower/nats/client.json (0600, no secrets):
                            {"mode": "token"} or {"mode": "user", "user": "tower", "password_file": "..."}
 
-Auth precedence: explicit connect() arguments (user/password_file, or a token_file) > TOWER_NATS_USER +
-TOWER_NATS_PASSWORD_FILE > client.json > the token (the default; a missing client.json means the token).
+Auth precedence: explicit user/password_file arguments > an explicit token_file argument > TOWER_NATS_USER +
+TOWER_NATS_PASSWORD_FILE > client.json > the default token file (a missing client.json means the token).
 
 Streams:
     TOWER      ev.>   file storage, limits retention, 30 days, 5 GiB cap, 10 minute duplicate window
@@ -158,8 +158,14 @@ def read_user_password(user: str | None = None, password_file: str | None = None
 def auth_options(token_file: str | None = None, *, user: str | None = None, password_file: str | None = None,
                  client_config: str | None = None) -> dict[str, str]:
     """The nats.connect auth options, by the precedence above. Values are secrets: never log the result."""
-    credentials = read_user_password(user, password_file)
-    if credentials is None and token_file is None:
+    if user:
+        credentials = read_user_password(user, password_file)
+    elif token_file is not None:
+        token = read_token(token_file)
+        return {"token": token} if token else {}
+    else:
+        credentials = read_user_password()
+    if credentials is None:
         config = read_client_config(client_config)
         if config is not None and config["mode"] == "user":
             credentials = config["user"], _read_password(config["password_file"])
@@ -172,6 +178,8 @@ def auth_options(token_file: str | None = None, *, user: str | None = None, pass
 def auth_mode(token_file: str | None = None) -> str:
     """'user <name>' or 'token' (no secrets), for status lines."""
     user = os.environ.get("TOWER_NATS_USER")
+    if token_file is not None:
+        return "token"
     if user:
         return f"user {user} (env)"
     config = None if token_file is not None else read_client_config()
