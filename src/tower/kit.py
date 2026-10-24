@@ -13,6 +13,8 @@ A HANDLER is one file with a subscription and a handle function:
 Return normally to ack. Raise kit.Drop(reason) to ack without acting (logged), kit.Fail(reason) to dead-letter
 now, anything else (or kit.Retry) to retry with backoff until MAX_DELIVER, then dead-letter to dlq.<NAME>.
 A WakeError from the waker retries when it is retryable and dead-letters otherwise.
+Optional `async def on_dead_letter(event, ctx, error)` runs after the host has published a dead letter (to keep
+durable state of your own); its errors are logged, never retried.
 
 A WATCHER is one file with a long-running loop that watches the outside world and publishes events:
 
@@ -24,7 +26,8 @@ A WATCHER is one file with a long-running loop that watches the outside world an
             await ctx.publish("nod.answer.received", data, id=stable_id)
             await asyncio.sleep(30)
 
-The host restarts a watcher that crashes, with backoff.
+The host restarts a watcher that crashes, with backoff. `ctx.reconnected` is an asyncio.Event the host sets when the
+bus connection comes back after a drop (watchers clear it themselves).
 """
 
 from __future__ import annotations
@@ -126,6 +129,7 @@ class Context:
     waker: AsyncWaker = field(default_factory=AsyncWaker)
     state_root: Path = STATE_ROOT
     stream: str = bus.STREAM
+    reconnected: asyncio.Event | None = None
 
     @property
     def state_dir(self) -> Path:
@@ -217,6 +221,7 @@ class HandlerSpec:
     max_deliver: int = DEFAULT_MAX_DELIVER
     backoff: tuple[float, ...] = DEFAULT_BACKOFF
     ack_wait: float = DEFAULT_ACK_WAIT
+    on_dead_letter: Callable[[dict[str, Any], Context, str], Awaitable[Any]] | None = None
 
     kind = "handler"
 
@@ -277,7 +282,10 @@ def load_file(path: Path) -> HandlerSpec | WatcherSpec:
         raise LoadError("MAX_DELIVER must be a positive int")
     if not all(isinstance(b, (int, float)) and b >= 0 for b in backoff):
         raise LoadError("BACKOFF must be a list of seconds")
-    return HandlerSpec(name, list(subscribe), handle, path, max_deliver, backoff, float(ack_wait))
+    on_dead_letter = getattr(module, "on_dead_letter", None)
+    if on_dead_letter is not None and not asyncio.iscoroutinefunction(on_dead_letter):
+        raise LoadError("on_dead_letter must be async def on_dead_letter(event, ctx, error)")
+    return HandlerSpec(name, list(subscribe), handle, path, max_deliver, backoff, float(ack_wait), on_dead_letter)
 
 
 def discover(dirs: Iterable[Path]) -> tuple[list[HandlerSpec | WatcherSpec], list[dict[str, str]]]:

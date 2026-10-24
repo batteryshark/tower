@@ -255,6 +255,23 @@ async def cmd_nod(args: argparse.Namespace) -> int:
         for rid in nod.pending():
             print(rid)
         return 0
+    if args.nod_command == "status":
+        report = nod.status()
+        run = report["last_run"] or {}
+        print(f"cursor: {report['cursor'] if report['cursor'] is not None else '-'}")
+        print("last catch-up: " + (" ".join(f"{k}={run[k]}" for k in
+              ("at", "result", "mode", "start", "cursor", "high_water", "pages", "processed", "terminal", "pending",
+               "error") if k in run) or "never"))
+        for namespace, counts in sorted(report["counts"].items()):
+            print(f"{namespace}: " + " ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+        for row in report["attention"]:
+            print(f"  {row['at']} {row['namespace']} {row['event_id']} request_id={row['request_id']} "
+                  f"revision={row['revision']} attempts={row['attempts']} {row['outcome']}")
+        return 0
+    if args.nod_command == "retry":
+        outcome = await nod.retry(args.event_id, nod.cli_env(args.mode))
+        print(f"retry ({args.mode}) {args.event_id}: {outcome.state}")
+        return 0 if outcome.terminal and not outcome.state.startswith("dead_lettered") else 1
     if not 1 <= args.limit <= 500:
         raise ValueError("--limit must be 1..500")
     report = await asyncio.to_thread(nod.reconcile, args.after, args.limit)
@@ -266,8 +283,9 @@ async def cmd_nod(args: argparse.Namespace) -> int:
         return 0
     outcomes = await nod.deliver(report["missing"], report["envelopes"], args.deliver_from_seq, args.mode)
     for row in outcomes:
-        print(f"catch-up ({args.mode}) seq={row['seq']} id={row['id']} {row['outcome']} {row.get('reason', '')}".rstrip())
-    return 1 if any(row["outcome"] == "failed" for row in outcomes) else 0
+        print(f"catch-up ({args.mode}) seq={row['seq']} id={row['id']} {row['outcome']}")
+    return 1 if any(not nod.is_terminal(row["outcome"]) or row["outcome"].startswith("dead_lettered")
+                    for row in outcomes) else 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -329,6 +347,12 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--mode", choices=["shadow", "live"], default="shadow", help="catch-up mode (default shadow)")
     q.set_defaults(func=cmd_nod)
     q = nod_sub.add_parser("pending", help="open request ids in the old watcher ledger (ids only)")
+    q.set_defaults(func=cmd_nod)
+    q = nod_sub.add_parser("status", help="catch-up cursor, last run, counts by state, rows needing attention")
+    q.set_defaults(func=cmd_nod)
+    q = nod_sub.add_parser("retry", help="reprocess one dead_lettered event through the same path")
+    q.add_argument("event_id")
+    q.add_argument("--mode", choices=["shadow", "live"], default="shadow", help="default shadow")
     q.set_defaults(func=cmd_nod)
     return parser
 

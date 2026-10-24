@@ -86,7 +86,10 @@ request id. The bus payload never carries content, origin or recipients: a handl
 Nod's protected detail route `GET /api/v1/integrations/events/{id}` (`envelope`, `channel_id`,
 `created_by_issuer_token_id`, `origin`, `decision`) and checks its envelope against the bus event. Delivery is at least
 once, beyond the 10 minute duplicate window, so consumers dedupe on `(source, id)` with `tower.ledger`; never on the
-request id or a high-water revision, since per-user answers can arrive out of order.
+request id or a high-water revision, since per-user answers can arrive out of order. Tower's recovery for these: if an event
+never reaches the bus or a consumer, the `nod-catchup` watcher finds it in Nod's journal from a durable cursor; it
+reaches back only as far as Nod's journal and that cursor, and Tower keeps no copy beyond its ledger (see
+[HANDLERS.md](HANDLERS.md#nod-recovery)).
 
 Add a row here when you add a channel. Use the `example.*` and `demo.*` domains for experiments.
 

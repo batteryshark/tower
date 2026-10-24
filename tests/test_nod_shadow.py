@@ -99,12 +99,7 @@ def assert_no_command_names(text):
 
 
 def test_wake_text_names_no_command():
-    from importlib import util
-    spec = util.spec_from_file_location("nar_text", BUILTIN_DIR / "nod_answer_recorded.py")
-    mod = util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    ctx = type("Ctx", (), {"waker": FakeWaker()})()
-    assert_no_command_names(mod.wake_text(answer_event(rid="req_x"), ctx))
+    assert_no_command_names(nod.wake_text(answer_event(rid="req_x"), FakeWaker()))
 
 
 def stats(host):
@@ -130,7 +125,7 @@ async def test_shadow_computes_but_never_wakes(temp_bus, tmp_path, fake_detail):
         await wait_for(done)
         assert waker.calls == []
         row = kit.shared_ledger(tmp_path / "state").bind(NAME).get(event["source"], event["id"], namespace="shadow")
-        assert row["outcome"] == "evaluated"
+        assert row["outcome"] == "handled"
         assert row["info"]["message_id"] == message_id_for(event["id"], salt=NAME)
         assert not kit.shared_ledger(tmp_path / "state").bind(NAME).seen(event["source"], event["id"], namespace="live")
         logs = host.test_logs.getvalue()
@@ -196,7 +191,7 @@ async def test_live_wakes_once_without_content_and_survives_restart(temp_bus, tm
             return stats(host).dropped == 1
         await wait_for(dropped)
         assert len(waker.calls) == 1
-        assert "already live-handled" in host.test_logs.getvalue()
+        assert "already handled" in host.test_logs.getvalue()
     finally:
         await host.stop()
 
@@ -262,10 +257,7 @@ async def test_mismatched_detail_dead_letters_at_once(temp_bus, tmp_path, fake_d
 def test_fetch_timeout_is_retryable(tmp_path):
     import socket
 
-    from importlib import util
-    spec = util.spec_from_file_location("nar", BUILTIN_DIR / "nod_answer_recorded.py")
-    mod = util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    mod = nod
     token = tmp_path / "t"
     token.write_text(NOD_TOKEN)
     server = socket.socket()
@@ -356,8 +348,8 @@ async def test_catch_up_runs_handler_shadow_by_default(tmp_path, fake_detail):
 
 def test_reconcile_reports_missing_answers_only(tmp_path):
     book = kit.shared_ledger(tmp_path).bind(NAME)
-    book.mark("nod/n", "e-live", namespace="live")
-    book.mark("nod/n", "e-shadow", namespace="shadow")
+    book.record("nod/n", "e-live", namespace="live", state="handled")
+    book.record("nod/n", "e-shadow", namespace="shadow", state="dropped:no origin")
 
     def env(seq, eid, type="nod.answer.recorded"):
         return {"seq": seq, "envelope": {"id": eid, "source": "nod/n", "type": type,

@@ -86,7 +86,8 @@ finished. To consume events too, `async for event, msg in ctx.subscribe("ev.x.>"
 | File | Kind | Does |
 |---|---|---|
 | `nod_answer_wake.py` (`nod-answer-wake`) | handler on `ev.nod.answer.received` | wakes `data.origin.session` in `data.origin.directory` with the request id and answer summary in a DATA block |
-| `nod_answer_recorded.py` (`nod-answer-recorded`) | handler on `ev.nod.answer.recorded` and `ev.nod.answer.received` | PROVISIONAL (Nod uplift). Reads the origin from Nod's detail route (2 s timeout; 404 or no origin drops; 5xx/timeout retries, dead letter after 5; a detail that does not match the event dead-letters), then wakes `origin.session` in `origin.directory` with ids and statuses only, never the answer. `TOWER_NOD_MODE` (env, else config `mode`): `shadow` (default) logs the wake without calling the waker, `live` wakes. Ledger namespaces `live`/`shadow` in `~/.tower/state/ledger.sqlite`; in shadow it also logs a `shadow pairing` record against the watcher's `ev.nod.answer.received` for the same request id. |
+| `nod_catchup.py` (`nod-catchup`) | watcher | PROVISIONAL (Nod uplift). Off unless `TOWER_NOD_CATCHUP=on` (logs `disabled`, makes no Nod call). When on: pages Nod's journal from a durable cursor on start, on bus reconnect and every `catchup_interval` (600 s), and runs every answer not yet terminal through the same path as `nod-answer-recorded`. See "Nod: recovery" below. |
+| `nod_answer_recorded.py` (`nod-answer-recorded`) | handler on `ev.nod.answer.recorded` and `ev.nod.answer.received` | PROVISIONAL (Nod uplift). Shares `tower.nod.process` with `nod-catchup`. Reads the origin from Nod's detail route (2 s timeout; 404 or no origin drops; 5xx/timeout retries, dead letter after 5; a detail that does not match the event dead-letters), then wakes `origin.session` in `origin.directory` with ids and statuses only, never the answer. `TOWER_NOD_MODE` (env, else config `mode`): `shadow` (default) logs the wake without calling the waker, `live` wakes. Ledger namespaces `live`/`shadow` in `~/.tower/state/ledger.sqlite`; in shadow it also logs a `shadow pairing` record against the watcher's `ev.nod.answer.received` for the same request id. |
 | `nod_watcher.py` (`nod-watcher`) | watcher | consumes `ev.nod.request.asked` (`request_id`, `origin {session, directory}`, optional `reference`), keeps open requests in `~/.tower/state/nod-watcher/requests.json`, polls Nod `GET /api/v1/requests/{id}/decision` every 15 s, publishes `ev.nod.answer.received` once per answered request (id from request id + answer digest). Stops watching on cancel/expiry or after 14 days. Env `TOWER_NOD_URL`, `TOWER_NOD_TOKEN_FILE`; without both it logs `disabled` and idles. Read-only, only for announced ids; never logs answers. |
 | `stall_ping_chief.py` (`stall-ping-chief`) | handler on `ev.lead.delivery.stalled` | reads an operator pointer file (JSON `session`, `directory`; default `~/.chief-of-staff/chief.json`, config `pointer`) fresh and messages the chief session with the stall as DATA |
 | `github_pr_review.py` (`github-pr-review`) | handler on `ev.github.pr.opened.>` | creates `~/.tower/reviews/<owner>-<repo>-pr<N>/` and starts a session there (agent `build`, model `claude-code/claude-sonnet-5-5[1m]`, title `review <owner>/<repo>#<N>`) that reads the PR with `gh pr view/diff` and writes `review.md`. It is told to post nothing to GitHub. |
@@ -127,14 +128,45 @@ ctx.ledger.mark(event["source"], event["id"], namespace="live", ref=request_id, 
 - Order: the handler's durable consumer (`nod-answer-recorded`, explicit ack) is created, by starting the host with
   the handler, BEFORE the Nod publisher is enabled. From then on every Nod event stays in JetStream until the handler
   acks it, so it is saved before it is acked (the save-before-ack the Nod contract asks for); a crash just redelivers.
-- Events published before the consumer existed (or evicted from the stream) are found with
-  `tower nod reconcile --after CURSOR [--limit N]`, which lists journal answers missing from the ledger and never
-  republishes. Add `--deliver-from-seq N` for a one-off catch-up that runs the missing events with seq >= N through
-  the same handler code in that process: shadow by default, `--mode live` to wake.
+- Events published before the consumer existed, or evicted from the stream, are recovered from Nod's journal by
+  `nod-catchup` (below). By hand: `tower nod reconcile --after CURSOR [--limit N]` lists journal answers with no terminal
+  row and never republishes; `--deliver-from-seq N` runs the missing ones with seq >= N through the same path in that
+  process (shadow by default, `--mode live` to wake).
 - `TOWER_NOD_TRUSTED_SOURCE` (or config `trusted_source`, e.g. `nod/<node-uuid>`) pins the Nod source; other sources
   are dropped and logged. Unset, any `nod` or `nod/*` source is accepted (the detail check still applies).
 - A 409 from OpenCode for the handler's own stable message id is looked up in the session (message, then inbox). Found:
   the ledger is marked `already_admitted` and nothing is sent again. Not found: a retryable error.
+- Set `TOWER_NOD_MODE` in the host env, not in a config table: the handler and the watcher read their own tables, and
+  both must run in the same mode.
+
+### Nod: recovery
+
+What is guaranteed: every answer Nod records gets a terminal ledger row in `~/.tower/state/ledger.sqlite` (handler
+`nod-answer-recorded`, namespace = mode), whether it arrives on the bus, is found by catch-up, or both. The row is one of
+`handled`, `already_admitted`, `dropped:<reason>` or `dead_lettered:<reason>`; until then it is `retrying:<reason>`
+with an attempt count. The same event wakes at most once: both paths key on `(source, event id)`, take a ledger claim
+on it before acting, use the same `message_id_for(event id, salt="nod-answer-recorded")`, and a 409 is looked up in
+the session. Order does not matter; a higher revision never hides a lower one.
+
+How catch-up works: each run reads `GET /api/v1/integrations/events?after=<cursor>&limit=<catchup_limit>` page by page
+(at most `catchup_pages` pages), stopping at the high water fixed by its first page. The cursor is stored in the
+ledger and moves past an event only when it and every event before it are terminal; a stuck event holds the cursor
+while later ones are still handled. A retryable failure is retried on later runs and dead-lettered after 5 attempts
+(also published to `dlq.nod-answer-recorded`). A 404 or 501 from the journal (a Nod without the release) backs off,
+doubling up to 6 hours, with a status line. One cursor serves both modes: after a switch from shadow to live,
+catch-up resumes where shadow left off and does not wake for events shadow already evaluated.
+
+The honest limit: recovery reaches only as far back as Nod's own journal and the stored cursor. Tower keeps no copy of
+Nod events beyond its ledger rows (ids, revision, state and the minimal envelope), and JetStream keeps events 30
+days. An event Nod has dropped from its journal, or that sits before the cursor, is not recovered automatically.
+
+Operators:
+
+```sh
+tower nod status                       # cursor, last catch-up run, counts by state, latest 20 rows needing attention
+tower nod retry <event_id> [--mode live]   # reprocess one dead_lettered row through the same path (shadow default)
+tower nod reconcile --after 0          # report journal answers with no terminal row (never republishes)
+```
 
 ## Watching it
 

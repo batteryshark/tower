@@ -63,6 +63,20 @@ restart every client that holds the old token (handler host, publishers, remote 
 Config change: edit `deploy/nats.conf.template`, re-run `./scripts/setup-nats.sh`, check with
 `nats-server -c ~/.tower/nats/nats.conf -t`, then `fleet restart nats`.
 
+## Nod shadow install (Step 0)
+
+The handler host runs `nod-answer-recorded` (shadow: logs the wake it would send, never calls the waker) and
+`nod-catchup` (off: logs `disabled`, no Nod call) with the env unchanged: `TOWER_NOD_MODE` unset means shadow,
+`TOWER_NOD_CATCHUP` unset means off. Install: fast-forward the main checkout to the pushed sha
+(`git pull --ff-only`), `uv sync` if `uv.lock` changed, `fleet restart tower-host`. Check `curl -s
+http://127.0.0.1:8796/health`, `tower handlers`, `tower nod status`, and that the log shows no `woke origin`.
+
+Rollback: never `git reset --hard` the main checkout without the lead. Instead, in a worktree from origin/main,
+`git revert --no-edit <first>^..<last>` (the Nod commits), push that to main, then in the main checkout
+`git pull --ff-only` and `fleet restart tower-host`. The durable consumer `nod-answer-recorded` stays on the stream
+after a revert; remove it with `nats consumer rm TOWER nod-answer-recorded` (or leave it: nothing reads it).
+`~/.tower/state/ledger.sqlite` can stay; nothing else uses it.
+
 ## Per-producer users (PLAN, not applied)
 
 Status: a plan for the Nod cutover. The live `nats.conf` and `auth.conf` still use the single shared token, and no

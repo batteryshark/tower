@@ -85,6 +85,7 @@ class Host:
         self._tasks: list[asyncio.Task] = []
         self._runner: web.AppRunner | None = None
         self._stopping = asyncio.Event()
+        self._reconnect_events: list[asyncio.Event] = []
         self.nc = None
         self.js = None
         self.started_at = events.now_iso()
@@ -93,7 +94,8 @@ class Host:
 
     async def start(self) -> None:
         self.nc = await bus.connect(
-            self.url, self.token_file, name="tower-host", max_reconnect_attempts=-1, reconnect_time_wait=2
+            self.url, self.token_file, name="tower-host", max_reconnect_attempts=-1, reconnect_time_wait=2,
+            reconnected_cb=self._on_reconnected,
         )
         self.js = self.nc.jetstream()
         await bus.ensure_streams(self.js)
@@ -146,7 +148,14 @@ class Host:
         finally:
             await self.stop()
 
+    async def _on_reconnected(self) -> None:
+        self.log.info("bus reconnected")
+        for event in self._reconnect_events:
+            event.set()
+
     def _context(self, name: str) -> kit.Context:
+        reconnected = asyncio.Event()
+        self._reconnect_events.append(reconnected)
         return kit.Context(
             name=name,
             js=self.js,
@@ -155,6 +164,7 @@ class Host:
             waker=self.waker,
             state_root=self.state_root,
             stream=self.stream,
+            reconnected=reconnected,
         )
 
     async def _guard(self, spec, coro) -> None:
@@ -253,6 +263,11 @@ class Host:
         await msg.term()
         stats.dead_lettered += 1
         ctx.log.error("dead-lettered", error=error[:300], dlq=bus.dlq_subject(spec.name), **info)
+        if spec.on_dead_letter is not None and isinstance(event, dict) and "id" in event:
+            try:
+                await spec.on_dead_letter(event, ctx, error)
+            except Exception as exc:  # noqa: BLE001 - the dead letter itself is already durable
+                ctx.log.error("on_dead_letter failed", error=_describe(exc)[:300], **info)
         return "dead_letter"
 
     # -- watchers -------------------------------------------------------------
