@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from pathlib import Path
 import sys
+import json
 
 import pytest
 from tower import kit,snapshot_refresh as refresh
@@ -64,3 +65,17 @@ async def test_fixed_subprocess_bounds_and_scrubbed_context(tmp_path,monkeypatch
     script.write_text('print("x"*40000)\n')
     with pytest.raises(ValueError,match='output bound'):
         await refresh.invoke(options,{'version':1,'kind':'periodic'})
+
+
+@pytest.mark.parametrize('count',[0,2,True,-1,'2'])
+async def test_safe_optional_redaction_counts(tmp_path,count):
+    script=tmp_path/'refresh.py'
+    result={'version':1,'refreshed':1,'stale_sources':[],'redactions':count}
+    script.write_text('import sys\nsys.stdin.read()\nprint('+repr(json.dumps(result))+')\n')
+    options={'python':str(Path(sys.executable).resolve()),'script':str(script),
+             'config':str(tmp_path/'config.json'),'item_id':'dkt_tower_refresh'}
+    if type(count) is int and count>=0:
+        assert (await refresh.invoke(options,{'version':1,'kind':'periodic'}))['redactions']==count
+    else:
+        with pytest.raises(ValueError,match='redaction count invalid'):
+            await refresh.invoke(options,{'version':1,'kind':'periodic'})

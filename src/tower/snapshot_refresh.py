@@ -80,7 +80,9 @@ async def invoke(config, payload):
             if error == 'lease_expired': raise kit.Fail('Snapshot lease expired; owner must renew through normal Docket client.')
             raise ValueError('refresh refused; owner must inspect source/config')
         result = json.loads(output)
-        schema.keys(result,'version refreshed stale_sources')
+        schema.keys(result,'version refreshed stale_sources redactions')
+        if 'redactions' in result and (type(result['redactions']) is not int or result['redactions'] < 0):
+            raise ValueError('refresh redaction count invalid')
         if type(result.get('version')) is not int or result['version'] != 1 or type(result.get('refreshed')) is not int or not 0 <= result['refreshed'] <= 100:
             raise ValueError('refresh result invalid')
         for pid in schema.seq(result.get('stale_sources'),100): schema.ident(pid)
@@ -101,4 +103,4 @@ async def handle(event, ctx):
     except (ValueError,TypeError,KeyError):
         raise kit.Drop('unapproved snapshot invalidation') from None
     result = await invoke(config,payload)
-    ctx.log.info('snapshots refreshed',refreshed=result['refreshed'],stale_sources=len(result['stale_sources']))
+    ctx.log.info('snapshots refreshed',refreshed=result['refreshed'],stale_sources=len(result['stale_sources']),redactions=result.get('redactions',0))
