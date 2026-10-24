@@ -128,7 +128,9 @@ c. In one go, in this order:
    4. `tower admin nats-users switch-clients --execute` (client.json mode user).
 d. `fleet restart tower-host`; it reconnects as `tower` through client.json. The gap where Tower clients cannot
    connect is c3 to c4 for the CLI and c3 to d for the host.
-e. The Docket lead restarts Docket as user `docket` with `~/.tower/secrets/docket.password`.
+e. Docket (owned by the Docket lead): remove `DOCKET_TOWER_TOKEN_FILE` from Docket's env (Docket drops its user
+   mode if `DOCKET_TOWER_TOKEN_FILE` exists, even empty), add `DOCKET_TOWER_NATS_USER=docket` and
+   `DOCKET_TOWER_PASSWORD_FILE=~/.tower/secrets/docket.password`, then restart Docket so it loads Docket `eef870c`.
 f. Verify:
    1. `tower admin nats-users verify --stage s1` prints `ok` for, in order: configured users are exactly
       tower, docket and nod; the token is refused; tower connects through client.json and reads the stream; among
@@ -144,7 +146,8 @@ Rollback (once, then HOLD):
    per-user one in `rollback-<ts>/`, sets client.json to `{"mode": "token"}`; password files stay).
 2. `nats-server -c ~/.tower/nats/nats.conf -t`, then `fleet restart nats`.
 3. `fleet restart tower-host`.
-4. Docket back to its token settings and restarted (Docket lead).
+4. Docket (Docket lead): restore `DOCKET_TOWER_TOKEN_FILE`, remove `DOCKET_TOWER_NATS_USER` and
+   `DOCKET_TOWER_PASSWORD_FILE`, restart Docket.
 5. Check: health 200, `tower handlers`, `tower auth` says `token`.
 
 ### S2: Nod's publisher on
