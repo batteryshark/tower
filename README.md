@@ -1,3 +1,5 @@
+<img src="assets/tower.png" alt="Cheerful control tower passing messages between tiny robots" width="320">
+
 # Tower
 
 Tower is an event bus for the tools and agents on this machine and tailnet. Anything can publish an event to a
