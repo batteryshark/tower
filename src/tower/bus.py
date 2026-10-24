@@ -3,6 +3,8 @@
 Environment:
     TOWER_NATS_URL         default nats://127.0.0.1:4222
     TOWER_NATS_TOKEN_FILE  default ~/.tower/secrets/nats.token (0600; read, never logged)
+    TOWER_NATS_USER        optional: connect as this NATS user instead of with the token
+    TOWER_NATS_PASSWORD_FILE  the user's password file (0600; read, never logged); required with TOWER_NATS_USER
 
 Streams:
     TOWER      ev.>   file storage, limits retention, 30 days, 5 GiB cap, 10 minute duplicate window
@@ -99,12 +101,43 @@ async def _log_error(exc: Exception) -> None:
     print(f"tower: {exc}", file=sys.stderr)
 
 
-async def connect(url: str | None = None, token_file: str | None = None, **options: Any) -> Client:
-    """Connect to the bus with the token from the token file. Extra options go to nats.connect."""
+def read_user_password(user: str | None = None, password_file: str | None = None) -> tuple[str, str] | None:
+    """(user, password) when TOWER_NATS_USER (or user) is set, else None. Raises ValueError if the password is missing."""
+    user = user or os.environ.get("TOWER_NATS_USER")
+    if not user:
+        return None
+    path = password_file or os.environ.get("TOWER_NATS_PASSWORD_FILE")
+    if not path:
+        raise ValueError("TOWER_NATS_USER is set but TOWER_NATS_PASSWORD_FILE is not")
+    try:
+        password = Path(os.path.expanduser(path)).read_text().strip()
+    except OSError as exc:
+        raise ValueError(f"NATS password file unreadable ({exc.__class__.__name__})") from None
+    if not password:
+        raise ValueError("NATS password file is empty")
+    return user, password
+
+
+async def connect(
+    url: str | None = None,
+    token_file: str | None = None,
+    *,
+    user: str | None = None,
+    password_file: str | None = None,
+    **options: Any,
+) -> Client:
+    """Connect to the bus. Default: the token from the token file. With TOWER_NATS_USER (or user=) set, connect as
+    that user with the password from TOWER_NATS_PASSWORD_FILE instead; the token is then not sent (NATS refuses a
+    token on a server configured with users). Extra options go to nats.connect."""
     servers = url or os.environ.get("TOWER_NATS_URL") or DEFAULT_URL
-    token = read_token(token_file)
-    if token:
-        options.setdefault("token", token)
+    credentials = read_user_password(user, password_file)
+    if credentials:
+        options.setdefault("user", credentials[0])
+        options.setdefault("password", credentials[1])
+    else:
+        token = read_token(token_file)
+        if token:
+            options.setdefault("token", token)
     options.setdefault("name", "tower")
     options.setdefault("error_cb", _log_error)
     options.setdefault("connect_timeout", 5)

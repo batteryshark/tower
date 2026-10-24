@@ -86,6 +86,7 @@ finished. To consume events too, `async for event, msg in ctx.subscribe("ev.x.>"
 | File | Kind | Does |
 |---|---|---|
 | `nod_answer_wake.py` (`nod-answer-wake`) | handler on `ev.nod.answer.received` | wakes `data.origin.session` in `data.origin.directory` with the request id and answer summary in a DATA block |
+| `nod_answer_recorded.py` (`nod-answer-recorded`) | handler on `ev.nod.answer.recorded` and `ev.nod.answer.received` | PROVISIONAL (Nod uplift). Reads the origin from Nod's detail route (2 s timeout; 404 or no origin drops; 5xx/timeout retries, dead letter after 5; a detail that does not match the event dead-letters), then wakes `origin.session` in `origin.directory` with ids and statuses only, never the answer. `TOWER_NOD_MODE` (env, else config `mode`): `shadow` (default) logs the wake without calling the waker, `live` wakes. Ledger namespaces `live`/`shadow` in `~/.tower/state/ledger.sqlite`; in shadow it also logs a `shadow pairing` record against the watcher's `ev.nod.answer.received` for the same request id. |
 | `nod_watcher.py` (`nod-watcher`) | watcher | consumes `ev.nod.request.asked` (`request_id`, `origin {session, directory}`, optional `reference`), keeps open requests in `~/.tower/state/nod-watcher/requests.json`, polls Nod `GET /api/v1/requests/{id}/decision` every 15 s, publishes `ev.nod.answer.received` once per answered request (id from request id + answer digest). Stops watching on cancel/expiry or after 14 days. Env `TOWER_NOD_URL`, `TOWER_NOD_TOKEN_FILE`; without both it logs `disabled` and idles. Read-only, only for announced ids; never logs answers. |
 | `stall_ping_chief.py` (`stall-ping-chief`) | handler on `ev.lead.delivery.stalled` | reads an operator pointer file (JSON `session`, `directory`; default `~/.chief-of-staff/chief.json`, config `pointer`) fresh and messages the chief session with the stall as DATA |
 | `github_pr_review.py` (`github-pr-review`) | handler on `ev.github.pr.opened.>` | creates `~/.tower/reviews/<owner>-<repo>-pr<N>/` and starts a session there (agent `build`, model `claude-code/claude-sonnet-5-5[1m]`, title `review <owner>/<repo>#<N>`) that reads the PR with `gh pr view/diff` and writes `review.md`. It is told to post nothing to GitHub. |
@@ -105,6 +106,22 @@ model = "claude-code/claude-sonnet-5-5[1m]"
 [nod-watcher]
 poll_interval = 15
 ```
+
+### The ledger
+
+`ctx.ledger` is a persistent ledger keyed on `(source, event id)`, scoped to the handler and a namespace, in
+`~/.tower/state/ledger.sqlite` (or `$TOWER_STATE_DIR`). Mark after the effect succeeded; `mark` inserts once and returns
+False for a repeat. Rows never expire.
+
+```python
+if ctx.ledger.seen(event["source"], event["id"], namespace="live"):
+    raise Drop("already handled")
+admission = await ctx.waker.message_session(...)
+ctx.ledger.mark(event["source"], event["id"], namespace="live", ref=request_id, outcome="woke")
+```
+
+`tower nod reconcile --after CURSOR [--limit N]` lists Nod journal answers missing from the `nod-answer-recorded`
+ledger (report only), and `tower nod pending` prints the old watcher's open request ids.
 
 ## Watching it
 

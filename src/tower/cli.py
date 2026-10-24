@@ -248,6 +248,23 @@ async def cmd_dlq(args: argparse.Namespace) -> int:
     return await cmd_watch(watch_args)
 
 
+async def cmd_nod(args: argparse.Namespace) -> int:
+    from . import nod
+
+    if args.nod_command == "pending":
+        for rid in nod.pending():
+            print(rid)
+        return 0
+    if not 1 <= args.limit <= 500:
+        raise ValueError("--limit must be 1..500")
+    report = await asyncio.to_thread(nod.reconcile, args.after, args.limit)
+    for row in report["missing"]:
+        print(f"missing seq={row['seq']} id={row['id']} request_id={row['request_id']} revision={row['revision']}")
+    print(f"scanned={report['scanned']} answers={report['answers']} missing={len(report['missing'])} "
+          f"next_cursor={report['next_cursor']} (report only; nothing republished)")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tower", description="Tower event bus (NATS JetStream).")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -296,6 +313,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--count", type=int, default=0)
     p.add_argument("--follow", action="store_true", help="keep following after the backlog")
     p.set_defaults(func=cmd_dlq)
+
+    p = sub.add_parser("nod", help="Nod uplift helpers (report only)")
+    nod_sub = p.add_subparsers(dest="nod_command", required=True)
+    q = nod_sub.add_parser("reconcile", help="answer.recorded events in Nod's journal missing from the ledger")
+    q.add_argument("--after", type=int, required=True, help="Nod journal cursor (seq) to start after")
+    q.add_argument("--limit", type=int, default=100, help="page size, 1..500 (default 100)")
+    q.set_defaults(func=cmd_nod)
+    q = nod_sub.add_parser("pending", help="open request ids in the old watcher ledger (ids only)")
+    q.set_defaults(func=cmd_nod)
     return parser
 
 

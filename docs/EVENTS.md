@@ -69,12 +69,24 @@ Wildcards for subscribers: `*` matches one token, `>` matches the rest (`ev.gith
 |---|---|---|
 | `ev.nod.request.asked` | anyone asking Nod and wanting a wake-up | `request_id`, `origin_session` |
 | `ev.nod.answer.received` | Tower's Nod watcher | `request_id`, `origin_session`, `answer` |
+| `ev.nod.request.created` | Nod (provisional, from Nod uplift) | `schema_version`, `request_id`, `revision`, `aggregate_status`, `decision_resolution` |
+| `ev.nod.answer.recorded` | Nod (provisional, from Nod uplift) | same, plus `decision_id` (opaque; equals the event id). One per accepted answer, so a per-user request has several. Handler `nod-answer-recorded` |
+| `ev.nod.request.cancelled` | Nod (provisional, from Nod uplift) | same as `request.created` |
+| `ev.nod.request.expired` | Nod (provisional, from Nod uplift) | same as `request.created` |
 | `ev.lead.delivery.stalled` | Docket (stall detector) | `lead_session`, `project`, `minutes_since_landed` |
 | `ev.docket.timer.fired` | Docket fires | `timer_id`, `name`, `fired_at` |
 | `ev.github.pr.opened.<owner>.<repo>` | GitHub watcher | `repo` (owner/name), `owner`, `number`, `title`, `url`, `author`, `head_sha`, `base`, `created_at`, `updated_at`, `draft` |
 | `ev.github.pr.updated.<owner>.<repo>` | GitHub watcher | same as `pr.opened`, plus `before` (previous head sha) |
 | `ev.github.branch.pushed.<owner>.<repo>` | GitHub watcher | `repo`, `owner`, `branch`, `ref`, `before`, `after`, `url` (compare link) |
 | `dlq.<handler>` | handler host | `handler`, `error`, `event` |
+
+The four `nod.*` rows above are provisional, from the Nod uplift. Nod publishes them from a transactional outbox with
+CloudEvents `source` `nod/<node-uuid>` (or `nod`), `id` a stable UUID and `Nats-Msg-Id` the same id, and `subject` the
+request id. The bus payload never carries content, origin or recipients: a handler that needs the origin session reads
+Nod's protected detail route `GET /api/v1/integrations/events/{id}` (`envelope`, `channel_id`,
+`created_by_issuer_token_id`, `origin`, `decision`) and checks its envelope against the bus event. Delivery is at least
+once, beyond the 10 minute duplicate window, so consumers dedupe on `(source, id)` with `tower.ledger`; never on the
+request id or a high-water revision, since per-user answers can arrive out of order.
 
 Add a row here when you add a channel. Use the `example.*` and `demo.*` domains for experiments.
 
