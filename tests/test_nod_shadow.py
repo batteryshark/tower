@@ -249,7 +249,7 @@ async def test_mismatched_detail_dead_letters_at_once(temp_bus, tmp_path, fake_d
         async def done():
             return stats(host).dead_lettered == 1
         await wait_for(done)
-        assert "data.request_id differs" in (await dead_letters(host.js, NAME))[0]["data"]["error"]
+        assert "detail-mismatch:data.request_id" in (await dead_letters(host.js, NAME))[0]["data"]["error"]
     finally:
         await host.stop()
 

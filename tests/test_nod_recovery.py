@@ -357,7 +357,7 @@ async def test_bus_dead_letter_leaves_durable_row(temp_bus, tmp_path, fake_nod):
         async def done():
             return host.stats[nod.HANDLER].dead_lettered == 1 and row(tmp_path, event) is not None
         await wait_for(done)
-        assert row(tmp_path, event)["outcome"].startswith("dead_lettered:Fail: detail fetch: HTTP 400")
+        assert row(tmp_path, event)["outcome"].startswith("dead_lettered:detail fetch: HTTP 400")
         assert row(tmp_path, event)["info"]["via"] == "bus"
     finally:
         await host.stop()

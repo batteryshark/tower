@@ -168,18 +168,25 @@ def get_page(base: str, token_path: str, after: int, limit: int, through: int | 
 # -- checks and wake text ---------------------------------------------------------
 
 
+ENVELOPE_FIELDS = ("id", "source", "type", "subject")
+DATA_FIELDS = ("request_id", "revision", "aggregate_status", "decision_id")
+FENCE = "pre-cutover-shadow"
+
+
 def mismatch(event: dict, detail: dict) -> str | None:
-    """Why the detail does not describe this bus event, or None."""
+    """The first field the handler uses that differs between the bus event and the authenticated detail, or None."""
     envelope = detail.get("envelope")
     if not isinstance(envelope, dict):
-        return "detail has no envelope"
-    for key in ("id", "source", "type"):
+        return "envelope"
+    for key in ENVELOPE_FIELDS:
         if envelope.get(key) != event.get(key):
-            return f"envelope {key} differs"
-    ours, theirs = event.get("data") or {}, envelope.get("data") or {}
-    for key in ("request_id", "revision"):
+            return key
+    ours, theirs = event.get("data") or {}, envelope.get("data")
+    if not isinstance(theirs, dict):
+        return "data"
+    for key in DATA_FIELDS:
         if theirs.get(key) != ours.get(key):
-            return f"data.{key} differs"
+            return f"data.{key}"
     return None
 
 
@@ -193,13 +200,14 @@ def valid_origin(origin) -> str | None:
     return None
 
 
-def wake_payload(event: dict) -> dict:
-    data = event.get("data") or {}
+def wake_payload(envelope: dict) -> dict:
+    """From the authenticated detail envelope only (never the bus copy)."""
+    data = envelope.get("data") or {}
     return {key: data.get(key) for key in ("request_id", "revision", "aggregate_status", "decision_id")}
 
 
-def wake_text(event: dict, waker) -> str:
-    return INTRO + "\n\n" + waker.data_block(wake_payload(event), label="nod answer")
+def wake_text(envelope: dict, waker) -> str:
+    return INTRO + "\n\n" + waker.data_block(wake_payload(envelope), label="nod answer")
 
 
 def _describe(exc: BaseException) -> str:
@@ -210,7 +218,8 @@ def _describe(exc: BaseException) -> str:
 
 
 def _reason(text: str) -> str:
-    return " ".join(str(text).split())[:200]
+    text = " ".join(str(text).split())
+    return (text[len("Fail: "):] if text.startswith("Fail: ") else text)[:200]
 
 
 # -- the one path -------------------------------------------------------------------
@@ -240,22 +249,26 @@ async def _evaluate(event: dict, env: Env) -> tuple[str, dict[str, Any]]:
         if exc.status is None or exc.status >= 500 or exc.status in (408, 429):
             raise kit.Retry(f"detail fetch: {exc}") from None
         raise kit.Fail(f"detail fetch: {exc}") from None
-    reason = mismatch(event, detail)
-    if reason:
-        raise kit.Fail(f"detail does not match the event: {reason}")
+    field = mismatch(event, detail)
+    if field:
+        raise kit.Fail(f"detail-mismatch:{field}")
+    # From here on only the authenticated detail is used.
+    envelope = detail["envelope"]
+    data = envelope["data"]
+    rid, revision = data["request_id"], data["revision"]
     origin = detail.get("origin")
     reason = valid_origin(origin)
     if reason:
         raise kit.Drop(reason)
 
     session, directory = origin["session"], origin["directory"]
-    message_id = env.waker.message_id_for(event_id, salt=HANDLER)
-    text = wake_text(event, env.waker)
+    message_id = env.waker.message_id_for(envelope["id"], salt=HANDLER)
+    text = wake_text(envelope, env.waker)
     extra = {"session": session, "message_id": message_id, "aggregate_status": data.get("aggregate_status")}
     if cfg.mode == "shadow":
         log.info("shadow wake (not sent)", request_id=rid, revision=revision, session=session, directory=directory,
                  message_id=message_id, text_chars=len(text))
-        log_pair(log, rid, {"event_id": event_id, "info": {"revision": revision}},
+        log_pair(log, rid, {"event_id": envelope["id"], "info": {"revision": revision}},
                  book.find(rid, namespace=WATCHER_NS))
         return "handled", extra
     admission = await env.waker.message_session(session, text, message_id=message_id, directory=directory)
@@ -278,12 +291,16 @@ DeadLetter = Callable[[dict, str], Awaitable[Any]]
 
 
 async def process(event: dict, env: Env, *, via: str, dead_letter: DeadLetter | None = None,
-                  force: bool = False) -> Outcome:
+                  force: bool = False, override_fence: bool = False) -> Outcome:
     """Run one event through the path and record the outcome.
 
     dead_letter None (the bus): Fail and retryable errors are re-raised for the host, which dead-letters and calls
     record_dead_letter. Otherwise retryable errors count attempts and dead-letter after MAX_ATTEMPTS through
     dead_letter(event, error); Fail dead-letters at once. force reprocesses a terminal row (operator retry).
+
+    Cutover fence: in live mode, an event with a terminal shadow row belongs to the old path forever. It gets a live
+    row dropped:pre-cutover-shadow and is never woken, from any path; only override_fence (an explicit operator
+    `tower nod retry <id> --mode live`) passes it.
     """
     if env.cfg.mode not in MODES:
         raise kit.Fail(f"TOWER_NOD_MODE must be shadow or live, not {env.cfg.mode!r}")
@@ -309,6 +326,17 @@ async def process(event: dict, env: Env, *, via: str, dead_letter: DeadLetter | 
         def record(state: str, attempt: bool = True) -> dict:
             return book.record(source, event_id, namespace=mode, state=state, ref=ref, info=info, attempt=attempt,
                                replace_terminal=force)
+
+        if mode == "live":
+            shadow = book.get(source, event_id, namespace="shadow")
+            if shadow and is_terminal(shadow["outcome"]):
+                if not override_fence:
+                    env.log.info("not woken: evaluated in shadow before cutover", id=event_id, request_id=ref,
+                                 shadow=shadow["outcome"])
+                    row = record(f"dropped:{FENCE}")
+                    return Outcome(row["outcome"], True)
+                env.log.warning("operator override of the pre-cutover shadow fence", id=event_id, request_id=ref,
+                                shadow=shadow["outcome"])
 
         try:
             state, extra = await _evaluate(event, env)
@@ -497,12 +525,24 @@ def status(state_root: Path | str = kit.STATE_ROOT) -> dict[str, Any]:
 
 
 async def retry(event_id: str, env: Env) -> Outcome:
-    """Reprocess one dead_lettered row through the same path (operator request)."""
+    """Reprocess one dead_lettered row through the same path (operator request).
+
+    In live mode this is also the one deliberate override of the cutover fence: an event shadow evaluated before
+    cutover (a live row dropped:pre-cutover-shadow, or only a shadow row) is run in live, and the override is logged.
+    """
+    live = env.cfg.mode == "live"
     rows = env.book.by_event(event_id, namespace=env.cfg.mode)
-    if not rows:
+    fenced = live and (not rows or rows[0]["outcome"] == f"dropped:{FENCE}")
+    if fenced:
+        shadow = [r for r in env.book.by_event(event_id, namespace="shadow") if is_terminal(r["outcome"])]
+        if not shadow:
+            raise NodError(f"no {env.cfg.mode} ledger row for {event_id}")
+        row = rows[0] if rows else shadow[0]
+    elif not rows:
         raise NodError(f"no {env.cfg.mode} ledger row for {event_id}")
-    row = rows[0]
-    if not row["outcome"].startswith("dead_lettered"):
+    else:
+        row = rows[0]
+    if not fenced and not row["outcome"].startswith("dead_lettered"):
         raise NodError(f"row is {row['outcome']}, not dead_lettered")
     envelope = row["info"].get("envelope")
     if not isinstance(envelope, dict) or envelope.get("id") != event_id:
@@ -510,7 +550,7 @@ async def retry(event_id: str, env: Env) -> Outcome:
 
     async def dead_letter(event, error):
         return None
-    return await process(envelope, env, via="retry", dead_letter=dead_letter, force=True)
+    return await process(envelope, env, via="retry", dead_letter=dead_letter, force=True, override_fence=live)
 
 
 def scan(after: int, limit: int, fetch: Callable[..., dict[str, Any]]) -> Iterator[tuple[int, dict[str, Any]]]:

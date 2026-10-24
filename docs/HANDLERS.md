@@ -136,6 +136,16 @@ ctx.ledger.mark(event["source"], event["id"], namespace="live", ref=request_id, 
   are dropped and logged. Unset, any `nod` or `nod/*` source is accepted (the detail check still applies).
 - A 409 from OpenCode for the handler's own stable message id is looked up in the session (message, then inbox). Found:
   the ledger is marked `already_admitted` and nothing is sent again. Not found: a retryable error.
+- Cutover fence: an event evaluated in shadow (a terminal shadow row) belongs to the old path forever. After the flip
+  to live, Tower never wakes for it, whether the bus redelivers it, a copy arrives with another `Nats-Msg-Id`, or
+  catch-up returns it: it gets one live row `dropped:pre-cutover-shadow`. The only override is an explicit
+  `tower nod retry <event_id> --mode live`, which logs that it overrides the fence. A non-terminal shadow row does not
+  fence. Watcher rows are not touched.
+- The wake comes only from Nod's authenticated detail. After the fetch, every field the handler uses (`id`, `source`,
+  `type`, `subject`, `data.request_id`, `data.revision`, `data.aggregate_status`, `data.decision_id`) must equal the
+  detail's envelope; any difference dead-letters as `detail-mismatch:<field>` with a ledger row, and nothing is woken.
+  The wake payload and target are then built from `detail.envelope` and `detail.origin` only. Bus, catch-up,
+  `retry` and `reconcile --deliver-from-seq` all go through the same `tower.nod.process`.
 - Set `TOWER_NOD_MODE` in the host env, not in a config table: the handler and the watcher read their own tables, and
   both must run in the same mode.
 
