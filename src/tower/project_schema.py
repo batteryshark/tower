@@ -140,7 +140,9 @@ def projection(data, p):
                 text(s[key])
     if 'knowledge' in data:
         k = obj(data['knowledge'])
-        keys(k, 'state provenance items')
+        keys(k, 'state provenance items observed_at')
+        if 'observed_at' in k and time(k['observed_at']) > generated:
+            raise ValueError('knowledge after export')
         text(k.get('provenance'), 500)
         if k.get('state') not in ('available', 'unavailable'):
             raise ValueError('invalid knowledge state')

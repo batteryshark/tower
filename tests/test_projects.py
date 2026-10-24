@@ -159,7 +159,7 @@ async def test_compact_semantic_summary(fixture, needs_you):
         assert ('<b class="needs-you">Needs you</b>' in overview) == (needs_you is True)
         assert 'The phone page is ready.' not in overview
         assert '<dd>The phone page is ready.</dd>' in detail
-        assert 'Updated just now' in overview and 'Updated just now' in detail
+        assert 'Oldest update just now' in overview and 'Updated just now' in detail
         assert 'Shared snapshots' not in detail and 'Unreported' not in detail
         assert '<h2>Acceptance</h2>' not in detail
         assert 'MAINe3654d2' not in detail.split('<summary>Project details</summary>')[0]
@@ -183,3 +183,19 @@ def test_unfinished_acceptance_hidden(fixture):
     assert pages.acceptance(data) == ''
     data['acceptance']['state'] = 'finished-awaiting-acceptance'
     assert 'Finished; awaiting acceptance' in pages.acceptance(data)
+
+
+async def test_knowledge_true_age_and_stale_source(fixture):
+    pages,p,data=fixture
+    data['knowledge']['observed_at']='2026-01-01T00:00:00Z'
+    data['summary']={'observed_at':'2026-01-01T00:00:00Z','reference':'source digest',
+                     'provenance':'Reviewed source · Source changed; owner must write short plain headers.'}
+    Path(p['root'],'projection.json').write_text(json.dumps(data))
+    app=web.Application(); pages.install(app)
+    async with TestClient(TestServer(app)) as client:
+        body=await (await client.get('/tower/projects/p_demo?file=knowledge')).text()
+        assert 'Notes and todos from ' in body
+        assert 'Source changed. The owner must shorten its plain progress header.' in body
+    for invalid in (False, None, '2099-01-01T00:00:00Z'):
+        data['knowledge']['observed_at']=invalid
+        with pytest.raises(ValueError): project_schema.projection(data,p)

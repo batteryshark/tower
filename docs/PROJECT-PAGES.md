@@ -113,7 +113,9 @@ Usable now / Left / Waiting on / Handed to. Status is operator-manifest scope, n
 Optional summary snapshot is a migration seam for legacy LEADs, not a new ledger. Its exact
 fields are shown above; observed_at/provenance/reference are mandatory. Optional `needs_you`
 is strictly boolean; absent/false means no Needs you marker. Only an explicit principal action
-should set it, never a substring match against prose. This is the only schema extension.
+should set it, never a substring match against prose. Optional `knowledge.observed_at` is
+strictly validated as a nonfuture timestamp no later than generated_at; this is the only
+other schema extension. Knowledge displays notes/todos from that real API read time.
 Explicit sourced summary text takes priority. A missing field may fall back to a local header
 only if <=100 characters without obvious hashes, IDs or paths. This conservative filter is not
 a plain-language translator: the parent owns templates and source language. Missing values are
@@ -122,9 +124,26 @@ Overview has one full-row project link: name, short manifest status, explicit Ne
 relative actual last landing if known. Detail caps the three main sentences at word boundaries
 around100 characters. Updated uses summary.observed_at, never generated_at or file mtime;
 absolute same-host local time is secondary in time tooltips (no script/CSP change).
+Overview uses the oldest known source observation rather than the newest masking stale rows.
 Selected files, including approved-outcome text, are behind a named Read disclosure by default;
 the GET file selection remains in the URL. Feed shows three recent factual events, with remaining
 events behind More activity; technical evidence is collapsed. Empty feed is omitted.
+
+## Automatic refresh adapter
+
+The existing host can load `project-snapshot-refresh` on exactly
+`ev.docket.snapshot.refresh_due` and `ev.lead.milestone.recorded` (source docket).
+Optional `project-snapshot-startup` runs once then returns, including on error.
+Both config sections accept only canonical absolute `python`, `script`, `config`
+paths and `item_id:"dkt_tower_refresh"`. Missing config is inert. No event-selected
+commands/args/paths, shell, scanner, new listener/service or native wake. The fixed
+subprocess gets sanitized semantic stdin (16KiB), a scrubbed environment,60s timeout
+and32KiB output bound. Docket calls and lease/marker validation live in the kit's
+`scripts/tower_refresh.py` / `tower_refresh_docket.py`; see kit
+`docs/tower-automatic-refresh.md` for exact private config, auth boundary, install and
+rollback. Native Knowledge is a true-age cache refreshed explicitly in genuine
+agent context; no credentials persisted into background processes. Enqueued clock
+notices are not downstream refresh proof. No runtime adapter is enabled by this source.
 
 ## Local validation / rollout
 

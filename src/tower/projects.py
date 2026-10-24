@@ -335,6 +335,8 @@ class Projects:
                 if selected:
                     body += '</dl>'
                     body += relative_time(observed, 'Updated ')
+                    if data.get('summary', {}).get('provenance', '').endswith(' · Source changed; owner must write short plain headers.'):
+                        body += '<p role="status">Source changed. The owner must shorten its plain progress header.</p>'
                     body += '<details><summary>Project details</summary>'
                     body += '<p>' + esc(fields['_source']) + ' · outcome ' + esc(p['outcome_id']) + '</p>'
                     for key in ('usable now', 'left', 'waiting on', 'handed to'):
@@ -355,7 +357,7 @@ class Projects:
             recent = sorted((e for e in feed if now-timedelta(hours=6) <= stamp(e['at']) <= now), key=lambda e: stamp(e['at']), reverse=True)
             if not selected:
                 if updated:
-                    body += relative_time(max(updated, key=stamp), 'Updated ')
+                    body += relative_time(min(updated, key=stamp), 'Oldest update ')
             if recent:
                 body += '<h2>Recent activity · last 6 hours</h2>'
             seen = set()
@@ -395,6 +397,7 @@ class Projects:
         body += '</select></label> <button>Open</button></form><details><summary>Read ' + esc(selected_label) + '</summary><article>'
         if chosen == 'knowledge':
             body += '<h2>Knowledge</h2><p>' + esc(knowledge.get('state', 'unavailable')) + ' · ' + esc(knowledge.get('provenance')) + '</p>'
+            body += relative_time(knowledge.get('observed_at'), 'Notes and todos from ')
             if knowledge.get('state') != 'available':
                 body += '<p>Knowledge unavailable: no available knowledge snapshot was reported. The project owner must refresh its shared snapshot.</p>'
             for item in entries:
