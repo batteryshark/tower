@@ -99,7 +99,8 @@ the projection and manifest. requested_at <= answered_at <= generated_at is mand
 Authenticity and chief-only issuance remain exporter obligations; Tower validates bindings,
 not cryptographic authenticity. No fake historical Nod receipt may be manufactured;
 the exporter must not carry an earlier outcome's answer into a new outcome.
-An unavailable projection yields unreported acceptance. LEAD text never grants acceptance.
+An unavailable projection omits acceptance. LEAD text never grants acceptance. Acceptance is
+displayed only for explicit finished/accepted/not-yet state in a valid outcome-bound projection.
 Keep native note/todo/plan IDs and todo boolean completed state; max 200 displayed items.
 Native plan may instead be the explicitly mapped Markdown file above.
 
@@ -110,13 +111,20 @@ Last landed is the newest actual landing for this outcome, never file mtime/head
 Unknown history remains unknown. Header uses only first 30 lines before first `##`:
 Usable now / Left / Waiting on / Handed to. Status is operator-manifest scope, not inference.
 Optional summary snapshot is a migration seam for legacy LEADs, not a new ledger. Its exact
-fields are shown above; observed_at/provenance/reference are mandatory. Current bounded plain
-header fields override corresponding snapshot fields. Missing values remain Unreported.
-Detail shows snapshot source/time and current-header source ID. Overview excerpts are max100
-characters per field and links open the full detail; every configured project gets one compact
-wrapping row (no first-N hiding). Activity includes project title. Manifest status is explicit
-owner-supplied/native scope and is never interpreted as acceptance. Header source ID, outcome
-and export timestamp remain visible on detail for freshness/provenance.
+fields are shown above; observed_at/provenance/reference are mandatory. Optional `needs_you`
+is strictly boolean; absent/false means no Needs you marker. Only an explicit principal action
+should set it, never a substring match against prose. This is the only schema extension.
+Explicit sourced summary text takes priority. A missing field may fall back to a local header
+only if <=100 characters without obvious hashes, IDs or paths. This conservative filter is not
+a plain-language translator: the parent owns templates and source language. Missing values are
+omitted. Full local header and provenance remain under Project details and the selected document.
+Overview has one full-row project link: name, short manifest status, explicit Needs you, and
+relative actual last landing if known. Detail caps the three main sentences at word boundaries
+around100 characters. Updated uses summary.observed_at, never generated_at or file mtime;
+absolute same-host local time is secondary in time tooltips (no script/CSP change).
+Selected files, including approved-outcome text, are behind a named Read disclosure by default;
+the GET file selection remains in the URL. Feed shows three recent factual events, with remaining
+events behind More activity; technical evidence is collapsed. Empty feed is omitted.
 
 ## Local validation / rollout
 

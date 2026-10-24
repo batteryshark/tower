@@ -57,7 +57,31 @@ def stamp(value):
 
 
 def esc(value):
-    return html.escape(str(value if value is not None else 'Unreported'))
+    return html.escape(str(value if value is not None else ''))
+
+
+def compact(value, limit=100):
+    """A display boundary, not a translation of the source language."""
+    value = ' '.join(str(value or '').split())
+    if len(value) <= limit:
+        return value
+    end = value.rfind(' ', 0, limit)
+    return value[:end if end > limit // 2 else limit].rstrip(' ,;:') + '…'
+
+
+def principal_sentence(value):
+    # Conservative fallback only; the projection writer owns plain-language editing.
+    return len(value) <= 100 and not re.search(r'[0-9a-f]{7,}|(?:ses_|msg_|ev\.)\w+|[/\\]|\b[A-Z]{3,}\d+', value, re.I)
+
+
+def relative_time(value, prefix=''):
+    parsed = stamp(value)
+    if not parsed:
+        return ''
+    seconds = max(0, int((datetime.now(timezone.utc) - parsed).total_seconds()))
+    age = ('just now' if seconds < 60 else f'{seconds // 60}m ago' if seconds < 3600
+           else f'{seconds // 3600}h ago' if seconds < 86400 else f'{seconds // 86400}d ago')
+    return f'<time datetime="{esc(value)}" title="{esc(parsed.astimezone().strftime("%c %Z"))}">{esc(prefix + age)}</time>'
 
 
 def header(source):
@@ -187,13 +211,15 @@ class Projects:
             data = {}
         fields = {k: v for k, v in data.get('summary', {}).items()
                   if k in ('usable now', 'left', 'waiting on', 'handed to')}
-        fields['_source'] = ('Snapshot: ' + data['summary']['provenance'] + ' · ' + data['summary']['reference'] + ' · observed ' + data['summary']['observed_at']) if 'summary' in data else 'Unreported'
+        fields['_source'] = ('Snapshot: ' + data['summary']['provenance'] + ' · ' + data['summary']['reference'] + ' · observed ' + data['summary']['observed_at']) if 'summary' in data else ''
+        fields['needs_you'] = data.get('summary', {}).get('needs_you') is True
         try:
             f = next(f for f in p.get('files', []) if f['id'] == p.get('header_file'))
             current = header(read_file(f.get('root', p['root']), f['path'], {'.md'}).decode())
-            fields.update(current)
-            if current:
-                fields['_source'] += ' · Current header: ' + f['id'] + ' (takes priority)'
+            fields['_header'] = current
+            for key, value in current.items():
+                if key not in fields and principal_sentence(value):
+                    fields[key] = value
         except (StopIteration, ValueError, OSError, UnicodeError):
             pass
         a = data.get('acceptance', {})
@@ -202,27 +228,28 @@ class Projects:
         if state in expected and not (a.get('request_state') == 'answered' and answer.get('value') == expected[state] and stamp(answer.get('answered_at')) and answer.get('id') and a.get('request_id') and a.get('provenance')):
             state = None
         fields['acceptance'] = state if state in ('unfinished', 'finished-awaiting-acceptance', 'accepted', 'not-yet') else 'unreported'
-        fields['status'] = p.get('status', 'unreported')
-        fields['last landed'] = max((e['at'] for e in self.activity(p, data) if e['kind'] == 'landing'), key=stamp, default='Unreported')
+        fields['status'] = p.get('status')
+        fields['last landed'] = max((e['at'] for e in self.activity(p, data) if e['kind'] == 'landing'), key=stamp, default=None)
+        for key in ('status', 'usable now', 'left', 'waiting on', 'handed to'):
+            if str(fields.get(key, '')).strip().lower() == 'unreported':
+                fields.pop(key, None)
         return fields
 
     def acceptance(self, data):
         """Plain evidence from a validated snapshot, never an inferred answer."""
         a = data.get('acceptance', {})
+        if a.get('state') not in ('finished-awaiting-acceptance', 'accepted', 'not-yet'):
+            return ''
         states = {'unfinished': 'Not finished', 'finished-awaiting-acceptance': 'Finished; awaiting acceptance',
                   'accepted': 'Accepted', 'not-yet': 'Not yet accepted'}
         request_states = {'none': 'Not requested', 'pending': 'Awaiting answer',
                           'expired': 'Expired', 'cancelled': 'Cancelled', 'answered': 'Answered'}
         answer = a.get('answer') or {}
-        pairs = [('State', states.get(a.get('state'), 'Unreported')),
-                 ('Request', request_states.get(a.get('request_state'), 'Unreported')),
-                 ('Requested at', a.get('requested_at', 'Unreported')),
-                 ('Actual answer', answer.get('value', 'No answer reported')),
-                 ('Answered at', answer.get('answered_at', 'Unreported')),
-                 ('Source', ' · '.join(filter(None, (a.get('provenance'), a.get('reference')))) or 'Unreported'),
-                 ('Answer source', ' · '.join(filter(None, (answer.get('provenance'), answer.get('reference')))) or 'Unreported')]
+        pairs = [('State', states.get(a.get('state'))),
+                 ('Request', request_states.get(a.get('request_state'))),
+                 ('Actual answer', answer.get('value'))]
         return '<h2>Acceptance</h2><dl>' + ''.join(
-            f'<div><dt>{esc(k)}</dt><dd>{esc(v)}</dd></div>' for k, v in pairs
+            f'<div><dt>{esc(k)}</dt><dd>{esc(v)}</dd></div>' for k, v in pairs if v
         ) + '</dl><details><summary>Acceptance technical details</summary><pre>' + esc(json.dumps(a, indent=2)) + '</pre></details>'
 
     def file_selection(self, p, chosen):
@@ -277,32 +304,45 @@ class Projects:
             title = 'Tower projects'
             if selected:
                 _, _, label = self.file_selection(selected, request.query.get('file'))
-                title = selected['title'] + ' · ' + label + ' · Tower'
-            body, feed = (f'<p>{esc(error)}</p>' if error else ''), []
-            body += '<p>Shared snapshots, not live status. As-of times are reported by the source; local headers may take priority.</p>'
+                title = selected['title']
+            body, feed, updated = (f'<p>{esc(error)}</p>' if error else ''), [], []
             for p in ([selected] if selected else projects):
                 if p.get('_invalid'):
                     body += '<section class="project-row">Project information unavailable: malformed configuration. The project owner must configure its shared snapshot.</section>'
                     continue
                 data, unavailable = self.projection(p)
                 fields = self.summary(p, data)
-                body += f'<section class="project-row"><a class="project-name" href="/tower/projects/{p["id"]}">{esc(p["title"])}</a>'
+                observed = data.get('summary', {}).get('observed_at')
+                if observed:
+                    updated.append(observed)
+                body += '<section class="project-row">'
+                if not selected:
+                    body += f'<a class="project-link" href="/tower/projects/{p["id"]}"><strong>{esc(p["title"])}</strong>'
+                else:
+                    body += '<div class="project-heading">'
+                body += '<span class="project-status">' + esc(compact(fields.get('status'), 70)) + '</span>'
+                if fields['needs_you']:
+                    body += '<b class="needs-you">Needs you</b>'
+                if fields.get('last landed'):
+                    body += '<small>' + relative_time(fields['last landed'], 'Landed ') + '</small>'
+                body += '</div>' if selected else '</a>'
                 if selected:
                     body += '<dl>'
-                for key in ('status', 'usable now', 'left', 'waiting on', 'acceptance', 'handed to', 'last landed'):
-                    value = fields.get(key)
-                    if key == 'acceptance':
-                        value = {'unfinished': 'Not finished', 'finished-awaiting-acceptance': 'Finished; awaiting acceptance', 'accepted': 'Accepted', 'not-yet': 'Not yet accepted', 'unreported': 'Unreported'}.get(value, 'Unreported')
-                    if selected:
-                        body += f'<div><dt>{esc(key)}</dt><dd>{esc(value)}</dd></div>'
-                    else:
-                        excerpt = str(value if value is not None else 'Unreported')
-                        body += f'<span class="summary-cell" title="{esc(excerpt)}"><b>{esc(key)}:</b> {esc(excerpt[:100])}' + ('…' if len(excerpt) > 100 else '') + '</span>'
+                    for key in ('usable now', 'left', 'waiting on'):
+                        value = fields.get(key)
+                        if value:
+                            body += f'<div><dt>{esc(key.capitalize())}</dt><dd>{esc(compact(value))}</dd></div>'
                 if selected:
                     body += '</dl>'
-                body += '<small>Snapshot as of: ' + esc(data.get('generated_at', 'Unavailable')) + '</small>'
-                if selected:
-                    body += '<small>' + esc(fields['_source']) + ' · outcome ' + esc(p['outcome_id']) + '</small>'
+                    body += relative_time(observed, 'Updated ')
+                    body += '<details><summary>Project details</summary>'
+                    body += '<p>' + esc(fields['_source']) + ' · outcome ' + esc(p['outcome_id']) + '</p>'
+                    for key in ('usable now', 'left', 'waiting on', 'handed to'):
+                        if fields.get(key):
+                            body += '<p><b>' + esc(key.capitalize()) + ':</b> ' + esc(fields[key]) + '</p>'
+                    if fields.get('_header'):
+                        body += '<h3>Local header</h3><pre>' + esc(json.dumps(fields['_header'], indent=2)) + '</pre>'
+                    body += '</details>'
                 body += '</section>'
                 if unavailable and not selected:
                     body += '<small>' + esc(p['title']) + ': ' + esc(unavailable) + '</small>'
@@ -312,21 +352,30 @@ class Projects:
                     body += self.files(p, data, request.query.get('file'))
                     body += self.acceptance(data)
             now = datetime.now(timezone.utc)
-            body += '<h2>Recent activity · last 6 hours</h2><p>Factual source timestamps; no file-mtime inference.</p>'
             recent = sorted((e for e in feed if now-timedelta(hours=6) <= stamp(e['at']) <= now), key=lambda e: stamp(e['at']), reverse=True)
+            if not selected:
+                if updated:
+                    body += relative_time(max(updated, key=stamp), 'Updated ')
+            if recent:
+                body += '<h2>Recent activity · last 6 hours</h2>'
             seen = set()
+            more_activity = False
             for e in recent:
                 event_key = (e['project_id'], e['id'])
                 if event_key in seen:
                     continue
                 seen.add(event_key)
-                body += '<section>' + esc(e['project_title']) + ' · ' + esc(e['kind']) + ' · ' + esc(e['at']) + '<p>' + esc(e.get('label')) + '</p><small>' + esc(e['reference']) + ' · ' + esc(e['provenance']) + '</small></section>'
-            if not recent:
-                body += '<p>No reported semantic activity in this window.</p>'
+                if len(seen) == 4:
+                    body += '<details><summary>More activity</summary>'
+                    more_activity = True
+                body += '<section class="activity"><b>' + esc(e['project_title']) + '</b> · ' + esc({'landing': 'Landed', 'acceptance': 'Acceptance', 'decision': 'Decision', 'handoff': 'Handoff'}[e['kind']]) + ' · ' + relative_time(e['at']) + '<p>' + esc(compact(e.get('label'))) + '</p><details><summary>Event details</summary><p>' + esc(e.get('label')) + '</p><small>' + esc(e['reference']) + ' · ' + esc(e['provenance']) + '</small></details></section>'
+            if more_activity:
+                body += '</details>'
             css = Path(__file__).with_name('viewer.html').read_text().split('<style>')[1].split('</style>')[0]
             css += 'a{color:var(--accent)} section{background:var(--card);padding:12px;border-radius:10px;margin:8px 0} dl{margin:0} dl>div{display:grid;grid-template-columns:9rem 1fr;gap:8px} dt{color:var(--muted)} dd{margin:0} p,dd,small{overflow-wrap:anywhere} img{max-width:100%;height:auto} select{max-width:100%;font:inherit} article{min-width:0} @media(max-width:420px){dl>div{grid-template-columns:6rem 1fr}}'
             css += '.project-row{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline}.project-name{font-weight:650}.summary-cell{font-size:12px;overflow-wrap:anywhere;min-width:0}.project-row dl,.project-row small{width:100%}.table-scroll{overflow-x:auto}table{border-collapse:collapse}td,th{padding:4px 8px;border:1px solid var(--line)}article p{margin:6px 0}'
             css += 'header,main,section,form,dl,dd{min-width:0} h1,a,label,article{overflow-wrap:anywhere} nav{display:flex;flex-wrap:wrap;gap:8px} nav a,.project-name{display:inline-flex;align-items:center;min-height:44px;min-width:44px;padding:8px;max-width:100%} a:focus-visible,select:focus-visible,button:focus-visible,summary:focus-visible{outline:3px solid var(--accent);outline-offset:2px} form{display:flex;flex-wrap:wrap;align-items:end;gap:8px;margin:12px 0} form label{display:grid;gap:4px;min-width:0;max-width:100%;flex:1 1 12rem} select,button{min-height:44px;min-width:44px} select{width:100%;background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px} details>summary{display:list-item;min-height:44px;padding:12px;overflow-wrap:anywhere} .project-row{align-items:center}'
+            css += '.project-row{display:block;padding:0}.project-link{display:grid;grid-template-columns:1fr auto;gap:3px 8px;padding:12px;min-height:44px;text-decoration:none;box-sizing:border-box}.project-link strong{grid-column:1/-1;text-decoration:underline}.project-status{color:var(--fg);font-size:13px}.project-link small{width:auto;color:var(--muted);font-size:12px}.needs-you{font-size:12px;color:var(--accent)}.project-heading{display:flex;flex-wrap:wrap;gap:6px 12px}.project-row:has(dl){padding:12px}.project-row dl{margin:8px 0;font-size:13px}.project-row time{font-size:12px;color:var(--muted)}.activity{font-size:13px}.activity p{margin:4px 0}h2{font-size:18px}details{width:100%}'
             document = '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + esc(title) + '</title><style>' + css + '</style><header><h1>' + esc(title) + '</h1><nav aria-label="Tower"><a href="/tower/">Events</a><a href="/tower/projects/">All projects</a></nav></header><main>' + body + '</main></html>'
             if len(document.encode()) > 2 * 1024 * 1024:
                 raise ValueError('response too large')
@@ -342,13 +391,14 @@ class Projects:
         body = '<form method="get"><label>File <select name="file">'
         for fid, label in options:
             body += f'<option value="{esc(fid)}"' + (' selected' if fid == chosen else '') + '>' + esc(label) + '</option>'
-        body += '</select></label> <button>Open</button></form><article>'
+        selected_label = next(text for fid, text in options if fid == chosen)
+        body += '</select></label> <button>Open</button></form><details><summary>Read ' + esc(selected_label) + '</summary><article>'
         if chosen == 'knowledge':
             body += '<h2>Knowledge</h2><p>' + esc(knowledge.get('state', 'unavailable')) + ' · ' + esc(knowledge.get('provenance')) + '</p>'
             if knowledge.get('state') != 'available':
                 body += '<p>Knowledge unavailable: no available knowledge snapshot was reported. The project owner must refresh its shared snapshot.</p>'
             for item in entries:
-                body += '<h3>' + esc(item.get('title')) + '</h3><small>ID ' + esc(item.get('id')) + ' · ' + esc(item.get('kind')) + ' · completed: ' + esc(item.get('completed')) + '</small>' + markdown(str(item.get('body', ''))[:50000], {})
+                body += '<h3>' + esc(item.get('title')) + '</h3><details><summary>Item details</summary><small>ID ' + esc(item.get('id')) + ' · ' + esc(item.get('kind')) + (' · completed: ' + esc(item['completed']) if 'completed' in item else '') + '</small></details>' + markdown(str(item.get('body', ''))[:50000], {})
         else:
             f = next((f for f in files if f['id'] == chosen), None)
             if not f:
@@ -365,4 +415,4 @@ class Projects:
                 body += markdown(read_file(root, f['path'], {'.md'}).decode(), images)
             except (ValueError, OSError, UnicodeError):
                 body += '<p>Selected file unavailable: missing, unreadable or not permitted. The project owner must restore or configure the shared document.</p>'
-        return body + '</article>'
+        return body + '</article></details>'

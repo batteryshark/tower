@@ -128,8 +128,10 @@ def projection(data, p):
     generated = time(data.get('generated_at'))
     if 'summary' in data:
         s = obj(data['summary'])
-        if set(s) - {'observed_at', 'provenance', 'reference', 'usable now', 'left', 'waiting on', 'handed to'}:
+        if set(s) - {'observed_at', 'provenance', 'reference', 'usable now', 'left', 'waiting on', 'handed to', 'needs_you'}:
             raise ValueError('unknown summary fields')
+        if 'needs_you' in s and type(s['needs_you']) is not bool:
+            raise ValueError('needs_you must be boolean')
         evidence(s)
         if time(s.get('observed_at')) > generated:
             raise ValueError('summary after export')

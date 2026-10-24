@@ -106,7 +106,9 @@ async def test_invalid_utf8_export_isolated(tmp_path):
         body = await response.text()
         assert response.status == 200
         assert 'Project One' in body and 'snapshot unavailable: missing, unreadable or invalid' in body
-        assert 'Valid Project' in body and 'GOOD PROJECT CONTENT' in body
+        assert 'Valid Project' in body and 'GOOD PROJECT CONTENT' not in body
+        detail = await (await client.get('/tower/projects/p2')).text()
+        assert 'GOOD PROJECT CONTENT' in detail
 
 
 @pytest.mark.parametrize('value', [0, 1, 'true', None, [], {}])
@@ -148,7 +150,7 @@ async def test_image_routes_summary_and_activity(tmp_path):
         for name in ('escape', 'svg', 'link', 'unlisted', '%2e%2e%2foutside.png'):
             assert (await client.get('/tower/projects/p1/images/' + name)).status == 404
         overview = await (await client.get('/tower/projects/')).text()
-        assert '<b>acceptance:</b> Accepted' in overview and 'Project One · landing' in overview
+        assert '<b>acceptance:</b>' not in overview and '<b>Project One</b> · Landed' in overview
         assert 'Actual source landing' in overview
     data['summary']['usable now'] = 'x' * 2001
     with pytest.raises(ValueError):
