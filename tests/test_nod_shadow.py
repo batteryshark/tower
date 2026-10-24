@@ -3,6 +3,7 @@
 import asyncio
 import io
 import json
+import os
 import subprocess
 import uuid
 
@@ -25,7 +26,7 @@ ORIGIN = {"session": "ses_origin", "directory": "/tmp/somewhere", "reference": "
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
     for name in ("TOWER_NOD_MODE", "TOWER_NOD_URL", "TOWER_NOD_TOKEN_FILE", "TOWER_NATS_USER",
-                 "TOWER_NATS_PASSWORD_FILE", "TOWER_CONFIG"):
+                 "TOWER_NATS_PASSWORD_FILE", "TOWER_CONFIG", "TOWER_NOD_TRUSTED_SOURCE"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -86,6 +87,24 @@ async def start_host(temp_bus, tmp_path, fake, mode, *, waker=None, fast=False, 
     await host.start()
     host.test_logs = logs
     return host
+
+
+COMMAND_NAMES = ("chief-nod", "nod-cli", "tower nod", "tower ", "curl", "show ", "`", "$ ", "/api/")
+
+
+def assert_no_command_names(text):
+    lowered = text.lower()
+    for name in COMMAND_NAMES:
+        assert name not in lowered, name
+
+
+def test_wake_text_names_no_command():
+    from importlib import util
+    spec = util.spec_from_file_location("nar_text", BUILTIN_DIR / "nod_answer_recorded.py")
+    mod = util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    ctx = type("Ctx", (), {"waker": FakeWaker()})()
+    assert_no_command_names(mod.wake_text(answer_event(rid="req_x"), ctx))
 
 
 def stats(host):
@@ -160,8 +179,10 @@ async def test_live_wakes_once_without_content_and_survives_restart(temp_bus, tm
     kind, session, text, kwargs = waker.calls[0]
     assert (kind, session, kwargs["directory"]) == ("message", "ses_origin", "/tmp/somewhere")
     assert kwargs["message_id"] == message_id_for(event["id"], salt=NAME)
-    for needle in ("req_live", '"revision": 3', '"aggregate_status": "pending"', event["id"], "chief-nod show req_live"):
+    for needle in ("req_live", '"revision": 3', '"aggregate_status": "pending"', event["id"],
+                   "your own authorised Nod route"):
         assert needle in text
+    assert_no_command_names(text)
     for forbidden in (SECRET, NOD_TOKEN, "yes", "iss_1", "ref-1"):
         assert forbidden not in text
     assert NOD_TOKEN not in host.test_logs.getvalue()
@@ -258,6 +279,78 @@ def test_fetch_timeout_is_retryable(tmp_path):
         server.close()
 
 
+class ReconcilingWaker(FakeWaker):
+    """Like the real waker after a 409 whose id it found already admitted in the session."""
+
+    async def message_session(self, session_id, text, **kwargs):
+        self.calls.append(("message", session_id, text, kwargs))
+        return type("Admission", (), {"message_id": kwargs["message_id"], "session_id": session_id,
+                                      "created": False, "reconciled": True})()
+
+
+async def test_409_already_admitted_marks_ledger(temp_bus, tmp_path, fake_detail):
+    host = await start_host(temp_bus, tmp_path, fake_detail, "live", waker=ReconcilingWaker())
+    try:
+        event = answer_event(rid="req_409")
+        fake_detail["details"][event["id"]] = detail_for(event)
+        await publish(host, event)
+
+        async def done():
+            return stats(host).handled == 1
+        await wait_for(done)
+        row = kit.shared_ledger(tmp_path / "state").bind(NAME).get(event["source"], event["id"], namespace="live")
+        assert row["outcome"] == "already_admitted"
+        assert "origin already admitted" in host.test_logs.getvalue()
+    finally:
+        await host.stop()
+
+
+async def test_trusted_source_drops_others(temp_bus, tmp_path, fake_detail, monkeypatch):
+    monkeypatch.setenv("TOWER_NOD_TRUSTED_SOURCE", "nod/node-1")
+    waker = FakeWaker()
+    host = await start_host(temp_bus, tmp_path, fake_detail, "live", waker=waker)
+    try:
+        good = answer_event(rid="req_good", source="nod/node-1")
+        forged = answer_event(rid="req_forged_src", source="nod/other")
+        for event in (good, forged):
+            fake_detail["details"][event["id"]] = detail_for(event)
+            await publish(host, event)
+
+        async def done():
+            return stats(host).handled == 1 and stats(host).dropped == 1
+        await wait_for(done)
+        assert len(waker.calls) == 1 and fake_detail["hits"] == 1
+        assert "is not the trusted Nod source" in host.test_logs.getvalue()
+    finally:
+        await host.stop()
+
+
+async def test_catch_up_runs_handler_shadow_by_default(tmp_path, fake_detail):
+    token = tmp_path / "nod.token"
+    token.write_text(NOD_TOKEN)
+    events_ = [answer_event(rid=f"req_c{i}") for i in range(3)]
+    for event in events_:
+        fake_detail["details"][event["id"]] = detail_for(event)
+    page = {"events": [{"seq": i + 1, "envelope": e} for i, e in enumerate(events_)], "next_cursor": 3,
+            "high_water": 3}
+    report = nod.reconcile(0, 100, state_root=tmp_path, fetch=lambda a, l, t: page)
+    assert len(report["missing"]) == 3
+    config = {NAME: {"url": fake_detail["url"], "token_file": str(token)}}
+    waker, logs = FakeWaker(), io.StringIO()
+    out = await nod.deliver(report["missing"], report["envelopes"], 2, "shadow", state_root=tmp_path, waker=waker,
+                            log=kit.Log("t", logs), config=config)
+    assert [(o["seq"], o["outcome"]) for o in out] == [(2, "handled"), (3, "handled")]
+    assert waker.calls == [] and "shadow wake (not sent)" in logs.getvalue()
+    assert os.environ.get("TOWER_NOD_MODE") is None
+    again = nod.reconcile(0, 100, state_root=tmp_path, fetch=lambda a, l, t: page)
+    assert [m["seq"] for m in again["missing"]] == [1]  # shadow-marked ones are no longer missing
+
+    out = await nod.deliver(again["missing"], again["envelopes"], 0, "live", state_root=tmp_path, waker=waker,
+                            log=kit.Log("t", logs), config=config)
+    assert out[0]["outcome"] == "handled" and len(waker.calls) == 1
+    assert NOD_TOKEN not in logs.getvalue()
+
+
 # -- tower nod ---------------------------------------------------------------
 
 
@@ -286,7 +379,7 @@ def test_reconcile_reports_missing_answers_only(tmp_path):
 def test_reconcile_empty_scoped_page_does_not_stall(tmp_path):
     report = nod.reconcile(10, 100, state_root=tmp_path,
                            fetch=lambda a, l, t: {"events": [], "next_cursor": 10, "high_water": 10})
-    assert report == {"scanned": 0, "answers": 0, "missing": [], "next_cursor": 10}
+    assert report == {"scanned": 0, "answers": 0, "missing": [], "next_cursor": 10, "envelopes": {}}
 
 
 def test_pending_lists_open_ids_only(tmp_path):
@@ -302,6 +395,8 @@ def test_cli_parses_nod_commands():
     args = cli.build_parser().parse_args(["nod", "reconcile", "--after", "7", "--limit", "50"])
     assert (args.nod_command, args.after, args.limit) == ("reconcile", 7, 50)
     assert cli.build_parser().parse_args(["nod", "pending"]).nod_command == "pending"
+    args = cli.build_parser().parse_args(["nod", "reconcile", "--after", "0", "--deliver-from-seq", "5"])
+    assert (args.deliver_from_seq, args.mode) == (5, "shadow")
 
 
 # -- bus auth -------------------------------------------------------------------

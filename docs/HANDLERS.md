@@ -120,8 +120,21 @@ admission = await ctx.waker.message_session(...)
 ctx.ledger.mark(event["source"], event["id"], namespace="live", ref=request_id, outcome="woke")
 ```
 
-`tower nod reconcile --after CURSOR [--limit N]` lists Nod journal answers missing from the `nod-answer-recorded`
-ledger (report only), and `tower nod pending` prints the old watcher's open request ids.
+`tower nod pending` prints the old watcher's open request ids.
+
+### nod-answer-recorded at cutover
+
+- Order: the handler's durable consumer (`nod-answer-recorded`, explicit ack) is created, by starting the host with
+  the handler, BEFORE the Nod publisher is enabled. From then on every Nod event stays in JetStream until the handler
+  acks it, so it is saved before it is acked (the save-before-ack the Nod contract asks for); a crash just redelivers.
+- Events published before the consumer existed (or evicted from the stream) are found with
+  `tower nod reconcile --after CURSOR [--limit N]`, which lists journal answers missing from the ledger and never
+  republishes. Add `--deliver-from-seq N` for a one-off catch-up that runs the missing events with seq >= N through
+  the same handler code in that process: shadow by default, `--mode live` to wake.
+- `TOWER_NOD_TRUSTED_SOURCE` (or config `trusted_source`, e.g. `nod/<node-uuid>`) pins the Nod source; other sources
+  are dropped and logged. Unset, any `nod` or `nod/*` source is accepted (the detail check still applies).
+- A 409 from OpenCode for the handler's own stable message id is looked up in the session (message, then inbox). Found:
+  the ledger is marked `already_admitted` and nothing is sent again. Not found: a retryable error.
 
 ## Watching it
 

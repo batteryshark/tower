@@ -78,7 +78,7 @@ API used (OpenCode 2.x, from the server's `/openapi.json`):
 | `bad_target` | no | session not found, or directory missing |
 | `archived` | no | session is archived |
 | `wrong_target` | no | session is in another directory than `directory` |
-| `conflict` | no | host returned another id, a 409 on the prompt, or the message id was used for another directory |
+| `conflict` | no (yes after a 409) | host returned another id, or the message id was used for another directory. A 409 on the prompt is looked up first (message, then inbox): found means an earlier admission (`Admission.reconciled`), not found is a retryable `conflict` |
 | `bad_request` | no | bad ids, delivery, model format, or a 400 from the server |
 
 ## Limits

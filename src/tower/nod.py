@@ -1,14 +1,18 @@
 """`tower nod`: report-only helpers for the Nod uplift (provisional).
 
     tower nod reconcile --after CURSOR [--limit N]   nod.answer.recorded events in Nod's journal missing from the ledger
+        [--deliver-from-seq N [--mode shadow|live]]  one-off catch-up: feed missing events with seq >= N through the
+                                                     nod-answer-recorded handler in this process (shadow by default)
     tower nod pending                                open request ids in the old watcher's ledger (ids only)
 
 reconcile pages GET {TOWER_NOD_URL}/api/v1/integrations/events?after=&limit=&through= up to the high water fixed by the
 first page, with the token at TOWER_NOD_TOKEN_FILE (by path, never printed). It reads and reports; it never publishes.
+The catch-up runs the same handler code (detail check, ledger, waker) directly, not through the bus.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import urllib.error
@@ -83,7 +87,7 @@ def reconcile(after: int, limit: int, *, state_root: Path | str = kit.STATE_ROOT
         base, token_path = _settings()
         fetch = lambda a, l, t: get_page(base, token_path, a, l, t)  # noqa: E731
     known = kit.shared_ledger(state_root).event_ids(HANDLER, ("live", "shadow"))
-    scanned, answers, missing, cursor = 0, 0, [], after
+    scanned, answers, missing, cursor, envelopes = 0, 0, [], after, {}
     for seq, envelope in scan(after, limit, fetch):
         if not envelope:
             cursor = max(cursor, seq)
@@ -95,9 +99,10 @@ def reconcile(after: int, limit: int, *, state_root: Path | str = kit.STATE_ROOT
         answers += 1
         if (envelope.get("source"), envelope.get("id")) not in known:
             data = envelope.get("data") or {}
+            envelopes[envelope.get("id")] = envelope
             missing.append({"seq": seq, "id": envelope.get("id"), "request_id": data.get("request_id"),
                             "revision": data.get("revision")})
-    return {"scanned": scanned, "answers": answers, "missing": missing, "next_cursor": cursor}
+    return {"scanned": scanned, "answers": answers, "missing": missing, "next_cursor": cursor, "envelopes": envelopes}
 
 
 def pending(state_root: Path | str = kit.STATE_ROOT) -> list[str]:
@@ -109,3 +114,39 @@ def pending(state_root: Path | str = kit.STATE_ROOT) -> list[str]:
     except (OSError, json.JSONDecodeError) as exc:
         raise NodError(f"watcher ledger unreadable ({exc.__class__.__name__})") from None
     return sorted(rid for rid, row in rows.items() if isinstance(row, dict) and row.get("state") == "open")
+
+
+async def deliver(missing: list[dict[str, Any]], envelopes: dict[str, dict[str, Any]], from_seq: int, mode: str, *,
+                  state_root: Path | str = kit.STATE_ROOT, waker: Any = None, log: kit.Log | None = None,
+                  config: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Feed missing events with seq >= from_seq through the handler. Returns one outcome per event."""
+    from .host import BUILTIN_DIR
+
+    if mode not in ("shadow", "live"):
+        raise NodError("--mode must be shadow or live")
+    spec = kit.load_file(BUILTIN_DIR / "nod_answer_recorded.py")
+    handler_config = dict((kit.load_config() if config is None else config).get(HANDLER) or {})
+    ctx = kit.Context(name=spec.name, js=None, log=log or kit.Log(f"{HANDLER}/catch-up"), config=handler_config,
+                      waker=waker or kit.AsyncWaker(), state_root=Path(os.path.expanduser(str(state_root))))
+    saved = os.environ.get("TOWER_NOD_MODE")
+    os.environ["TOWER_NOD_MODE"] = mode  # this process only; the choice is explicit on the command line
+    outcomes = []
+    try:
+        for row in missing:
+            if row["seq"] < from_seq:
+                continue
+            outcome = {"seq": row["seq"], "id": row["id"]}
+            try:
+                await spec.handle(envelopes[row["id"]], ctx)
+                outcome["outcome"] = "handled"
+            except kit.Drop as exc:
+                outcome.update(outcome="dropped", reason=str(exc)[:200])
+            except Exception as exc:  # noqa: BLE001 - report and move on; the next run retries it
+                outcome.update(outcome="failed", reason=f"{exc.__class__.__name__}: {exc}"[:200])
+            outcomes.append(outcome)
+    finally:
+        if saved is None:
+            os.environ.pop("TOWER_NOD_MODE", None)
+        else:
+            os.environ["TOWER_NOD_MODE"] = saved
+    return outcomes

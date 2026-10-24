@@ -21,6 +21,7 @@ class FakeOpenCode:
         self.calls: list[tuple[str, str, dict | None]] = []
         self.auth_seen: set[str] = set()
         self.fail_next: int | None = None
+        self.messages: dict[str, set[str]] = {}
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -57,6 +58,12 @@ class FakeOpenCode:
                         return self._send(404, {"error": "SessionNotFound"})
                     if method == "GET" and len(parts) == 3:
                         return self._send(200, {"data": fake.sessions[sid]})
+                    if method == "GET" and parts[3:4] == ["message"] and len(parts) == 5:
+                        if parts[4] in fake.messages.get(sid, set()):
+                            return self._send(200, {"data": {"id": parts[4]}})
+                        return self._send(404, {"error": "MessageNotFound"})
+                    if method == "GET" and parts[3:] == ["inbox"]:
+                        return self._send(200, {"data": list(fake.inbox.get(sid, {}).values())})
                     if method == "POST" and parts[3:] == ["prompt"]:
                         box = fake.inbox.setdefault(sid, {})
                         mid = body["id"]
@@ -150,13 +157,28 @@ def test_server_errors_are_retryable(fake, waker, tmp_path):
     assert exc.value.code == "unavailable" and exc.value.retryable
 
 
-def test_conflict_on_409(fake, waker, tmp_path):
+def test_409_not_in_session_is_retryable(fake, waker, tmp_path):
     fake.add(SID, str(tmp_path))
     waker._check_session = lambda *a: {}
     fake.fail_next = 409
     with pytest.raises(W.WakeError) as exc:
         waker.message_session(SID, "x", message_id="msg_1")
-    assert exc.value.code == "conflict" and not exc.value.retryable
+    assert exc.value.code == "conflict" and exc.value.retryable
+    assert [c[1] for c in fake.calls[-2:]] == [f"/api/session/{SID}/message/msg_1", f"/api/session/{SID}/inbox"]
+
+
+@pytest.mark.parametrize("where", ["message", "inbox"])
+def test_409_for_our_admitted_id_reconciles(fake, waker, tmp_path, where):
+    fake.add(SID, str(tmp_path))
+    waker._check_session = lambda *a: {}
+    if where == "message":
+        fake.messages[SID] = {"msg_1"}
+    else:
+        fake.inbox[SID] = {"msg_1": {"id": "msg_1", "text": "x", "delivery": "queue"}}
+    fake.fail_next = 409
+    a = waker.message_session(SID, "x", message_id="msg_1")
+    assert a.reconciled and a.message_id == "msg_1" and a.raw["found"] == where
+    assert len(fake.prompts()) == 1
 
 
 def test_unreachable_is_retryable(tmp_path):

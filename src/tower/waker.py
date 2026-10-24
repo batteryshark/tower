@@ -71,6 +71,7 @@ class Admission:
     message_id: str
     delivery: str
     created: bool = False          # start_session made a new session on this call
+    reconciled: bool = False       # a 409 for our own id, found already admitted in the session
     raw: dict = field(default_factory=dict)
 
 
@@ -189,8 +190,8 @@ class Waker:
         if status == 404:
             raise WakeError(BAD_TARGET, "session not found")
         if status == 409:
-            # Same handling as Docket: the host refused this id; do not mint a new one.
-            raise WakeError(CONFLICT, "admission id already exists")
+            # The host already holds this id. Never mint a new one: look it up (as Docket's reconcile does).
+            return self._reconcile(session_id, message_id, delivery)
         if status != 200:
             raise _status_error(status, body, "prompt")
         data = (body or {}).get("data") or {}
@@ -199,6 +200,22 @@ class Waker:
             raise WakeError(CONFLICT, "host admission id did not match")
         mode = data.get("delivery") or delivery
         return Admission(session_id, returned, mode, raw={"id": returned, "delivery": mode})
+
+    def _reconcile(self, session_id: str, message_id: str, delivery: str) -> Admission:
+        """After a 409: our id in the transcript or the inbox is an earlier admission; otherwise retry later."""
+        sid, mid = quote(session_id, safe=""), quote(message_id, safe="")
+        status, body = self._request("GET", f"/api/session/{sid}/message/{mid}")
+        if status == 200 and ((body or {}).get("data") or {}).get("id") == message_id:
+            return Admission(session_id, message_id, delivery, reconciled=True, raw={"id": message_id, "found": "message"})
+        if status not in (200, 404):
+            raise WakeError(UNAVAILABLE, f"message lookup failed ({status})", retryable=True)
+        status, body = self._request("GET", f"/api/session/{sid}/inbox")
+        if status != 200:
+            raise WakeError(UNAVAILABLE, f"inbox lookup failed ({status})", retryable=True)
+        items = (body or {}).get("data")
+        if isinstance(items, list) and any(isinstance(i, dict) and i.get("id") == message_id for i in items):
+            return Admission(session_id, message_id, delivery, reconciled=True, raw={"id": message_id, "found": "inbox"})
+        raise WakeError(CONFLICT, "409 for our id, but it is not in the session yet", retryable=True)
 
     @contextmanager
     def _ledger(self):

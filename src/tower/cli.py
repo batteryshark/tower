@@ -261,8 +261,13 @@ async def cmd_nod(args: argparse.Namespace) -> int:
     for row in report["missing"]:
         print(f"missing seq={row['seq']} id={row['id']} request_id={row['request_id']} revision={row['revision']}")
     print(f"scanned={report['scanned']} answers={report['answers']} missing={len(report['missing'])} "
-          f"next_cursor={report['next_cursor']} (report only; nothing republished)")
-    return 0
+          f"next_cursor={report['next_cursor']} (nothing republished)")
+    if args.deliver_from_seq is None:
+        return 0
+    outcomes = await nod.deliver(report["missing"], report["envelopes"], args.deliver_from_seq, args.mode)
+    for row in outcomes:
+        print(f"catch-up ({args.mode}) seq={row['seq']} id={row['id']} {row['outcome']} {row.get('reason', '')}".rstrip())
+    return 1 if any(row["outcome"] == "failed" for row in outcomes) else 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -319,6 +324,9 @@ def build_parser() -> argparse.ArgumentParser:
     q = nod_sub.add_parser("reconcile", help="answer.recorded events in Nod's journal missing from the ledger")
     q.add_argument("--after", type=int, required=True, help="Nod journal cursor (seq) to start after")
     q.add_argument("--limit", type=int, default=100, help="page size, 1..500 (default 100)")
+    q.add_argument("--deliver-from-seq", type=int, metavar="N",
+                   help="one-off catch-up: run missing events with seq >= N through the handler in this process")
+    q.add_argument("--mode", choices=["shadow", "live"], default="shadow", help="catch-up mode (default shadow)")
     q.set_defaults(func=cmd_nod)
     q = nod_sub.add_parser("pending", help="open request ids in the old watcher ledger (ids only)")
     q.set_defaults(func=cmd_nod)
