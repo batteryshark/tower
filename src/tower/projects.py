@@ -14,6 +14,7 @@ from . import project_schema as schema
 LIMIT = 512 * 1024
 ID = re.compile(r'^[A-Za-z0-9_-]{1,80}$')
 DENIED = re.compile(r'secret|credential|token|auth|password|(^|[._-])key([._-]|$)', re.I)
+PRIVATE = re.compile(r'-----BEGIN .*PRIVATE KEY|\b(?:sk-|gh[pousr]_|github_pat_)[A-Za-z0-9_-]{12,}|\bBearer\s+\S+|(?:api[_-]?key|password|access[_-]?token)\s*[:=]\s*\S+', re.I)
 HEADERS = {'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
            'Referrer-Policy': 'no-referrer', 'Content-Security-Policy':
            "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'"}
@@ -47,6 +48,11 @@ def read_file(root, relative, suffixes, limit=LIMIT):
             data = stream.read(limit + 1)
             if len(data) > limit:
                 raise ValueError('file too large')
+            # Explicit legacy sources may be served directly. Recheck at PAGE READ
+            # as well as refresh, so a new private value cannot ride an old allowlist.
+            if path.suffix.lower() in {'.md','.png','.jpg','.jpeg','.gif','.webp'}:
+                text = data.decode('utf-8' if path.suffix.lower()=='.md' else 'latin1')
+                if PRIVATE.search(text): raise ValueError('private content unavailable')
             return data
     finally:
         os.close(fd)
@@ -310,7 +316,7 @@ class Projects:
         selected = []
         for p, data, unavailable in rows:
             last = self.last_activity(p, data)
-            running = self.runtime_state(data, now) == 'running'
+            running = p.get('content_available') is not False and self.runtime_state(data, now) == 'running'
             flight = running or bool(last and now - timedelta(hours=48) <= stamp(last) <= now)
             if flight == (tab == 'flight') and (tab != 'else' or search.casefold() in p['title'].casefold()):
                 selected.append((p, data, unavailable))
@@ -335,6 +341,7 @@ class Projects:
     async def image(self, request):
         try:
             _, _, p = self.selected(request)
+            if p.get('content_available') is False: raise web.HTTPNotFound()
             image = next(i for i in p.get('images', []) if i['id'] == request.match_info['image'])
             data = read_file(p['root'], image['path'], {'.png', '.jpg', '.jpeg', '.gif', '.webp'}, 2*1024*1024)
             if data.startswith(b'\x89PNG\r\n\x1a\n'):
@@ -375,6 +382,8 @@ class Projects:
                     if 1 <= n <= pages:
                         body += '<a href="?' + esc(urlencode(dict(tab=tab, q=search, page=n))) + '">' + label + '</a>'
                 body += '</nav>'
+                if not rows:
+                    body += '<p>No projects in this view.</p>'
             for p, data, unavailable in rows:
                 if p.get('_invalid'):
                     body += '<section class="project-row">Project information unavailable: malformed configuration. The project owner must configure its shared snapshot.</section>'
@@ -408,7 +417,8 @@ class Projects:
                         body += '<p role="status">Source changed. The owner must shorten its plain progress header.</p>'
                     body += '<details><summary>Project details</summary>'
                     body += '<p>' + esc(fields['_source']) + ' · outcome ' + esc(p['outcome_id']) + '</p>'
-                    body += '<p>Lead runtime: ' + esc(self.runtime_state(data)) + '</p>'
+                    runtime = 'unknown' if p.get('content_available') is False else self.runtime_state(data)
+                    body += '<p>Lead runtime: ' + esc(runtime) + '</p>'
                     if data.get('runtime',{}).get('provenance')=='docket.running_sample':
                         body += relative_time(data['runtime']['at'], 'Busy sample ') + '<p>docket.running_sample</p>'
                     for key in ('usable now', 'left', 'waiting on', 'handed to'):
@@ -460,6 +470,8 @@ class Projects:
             return web.Response(text='Project information unavailable: configuration missing, unreadable or invalid. The project owner must refresh or configure its shared snapshot.', status=503, headers=HEADERS)
 
     def files(self, p, data, chosen):
+        if p.get('content_available') is False:
+            return '<p role="status">Project files unavailable — refresh did not finish. The project owner must refresh its shared snapshot.</p>'
         files = p.get('files', [])
         knowledge = data.get('knowledge', {})
         entries = knowledge.get('items', [])[:200] if knowledge.get('state') == 'available' else []

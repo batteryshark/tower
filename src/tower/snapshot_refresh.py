@@ -70,9 +70,12 @@ async def invoke(config, payload):
         stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL,env=env)
     async def bounded():
         process.stdin.write(raw); await process.stdin.drain(); process.stdin.close()
-        try: output = await process.stdout.readexactly(32769)
+        # 1000 maximum-length (80-character) stale IDs plus the small envelope.
+        # Only this IPC bound grows; manifest/source/content limits are unchanged.
+        result_limit = 84 * 1024
+        try: output = await process.stdout.readexactly(result_limit+1)
         except asyncio.IncompleteReadError as exc: output = exc.partial
-        if len(output) > 32768: raise ValueError('refresh output bound')
+        if len(output) > result_limit: raise ValueError('refresh output bound')
         code = await process.wait()
         if code:
             try: error = json.loads(output).get('error')

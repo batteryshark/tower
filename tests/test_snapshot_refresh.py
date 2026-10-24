@@ -62,9 +62,24 @@ async def test_fixed_subprocess_bounds_and_scrubbed_context(tmp_path,monkeypatch
     monkeypatch.setenv('OPENCODE_SESSION_ID','ses_never_forward')
     script.write_text('import os,sys,json\nassert "OPENCHAMBER_AGENT_TOOL_TOKEN" not in os.environ\nassert "OPENCODE_SESSION_ID" not in os.environ\nassert json.load(sys.stdin)=={"version":1,"kind":"periodic"}\nprint(json.dumps({"version":1,"refreshed":1,"stale_sources":[]}))\n')
     assert (await refresh.invoke(options,{'version':1,'kind':'periodic'}))['refreshed']==1
-    script.write_text('print("x"*40000)\n')
+    script.write_text('print("x"*(84*1024+1))\n')
     with pytest.raises(ValueError,match='output bound'):
         await refresh.invoke(options,{'version':1,'kind':'periodic'})
+
+
+async def test_1000_maximum_length_stale_ids_fit_only_result_bound(tmp_path):
+    ids=['p'+str(i).zfill(79) for i in range(1000)]
+    result=dict(version=1,refreshed=1000,stale_sources=ids,redactions=0)
+    raw=json.dumps(result)
+    assert 32768 < len(raw.encode()) < 84*1024
+    script=tmp_path/'refresh.py'
+    script.write_text('import sys\nsys.stdin.read()\nprint('+repr(raw)+')\n')
+    options=dict(python=str(Path(sys.executable).resolve()),script=str(script),config=str(tmp_path/'config.json'),item_id='dkt_tower_refresh')
+    assert (await refresh.invoke(options,dict(version=1,kind='periodic')))['stale_sources']==ids
+    result['refreshed']=1001
+    script.write_text('import sys\nsys.stdin.read()\nprint('+repr(json.dumps(result))+')\n')
+    with pytest.raises(ValueError,match='refresh result invalid'):
+        await refresh.invoke(options,dict(version=1,kind='periodic'))
 
 
 @pytest.mark.parametrize('count',[0,2,True,-1,'2'])

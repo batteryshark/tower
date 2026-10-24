@@ -1,6 +1,7 @@
 """Synthetic-only scale and navigation; no project discovery or live runtime reads."""
 import json
 import subprocess
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -82,3 +83,64 @@ def test_optional_inputs_fail_closed(name, value):
     data=dict(version=1, project_id='p', outcome_id='o', generated_at=now)
     data[name]=dict(at=now, reference='Source', provenance='Owner', **value) if 'at' not in value else value
     with pytest.raises(ValueError): schema.projection(data, dict(id='p',outcome_id='o'))
+
+
+async def test_page_read_busy_exact_expiry_and_future_unknown(tmp_path):
+    from test_projects import fixture
+    pages,p,data=fixture.__wrapped__(tmp_path)
+    now=datetime(2026,1,4,tzinfo=timezone.utc)
+    class PageClock(datetime):
+        @classmethod
+        def now(cls,tz=None): return now
+    data['file_update']['at']='2026-01-01T00:00:00Z'
+    app=web.Application(); pages.install(app)
+    async with TestClient(TestServer(app)) as client:
+        for age,expected in ((0,'running'),(120,'running'),(121,'unknown'),(-1,'unknown')):
+            sample=(now-timedelta(seconds=age)).isoformat()
+            data['runtime']=dict(state='running',at=sample,reference='ses_fixture',provenance='docket.running_sample')
+            (tmp_path/'projection.json').write_text(json.dumps(data))
+            with patch('tower.projects.datetime',PageClock):
+                overview=await (await client.get('/tower/projects/')).text()
+                detail=await (await client.get('/tower/projects/p_demo')).text()
+                elsewhere=await (await client.get('/tower/projects/?tab=else')).text()
+            assert ('class="project-link"' in overview)==(expected=='running')
+            assert ('class="project-link"' in elsewhere)==(expected=='unknown')
+            assert 'Lead runtime: '+expected in detail
+            assert data['runtime']['at']==sample # No timestamp renewal at page read.
+        data['runtime']['state']='unknown'
+        (tmp_path/'projection.json').write_text(json.dumps(data))
+        with patch('tower.projects.datetime',PageClock):
+            assert 'class="project-link"' not in await (await client.get('/tower/projects/')).text()
+
+
+async def test_guarded_manifest_and_current_private_content_unavailable(tmp_path):
+    from test_projects import fixture
+    pages,p,data=fixture.__wrapped__(tmp_path)
+    p['content_available']=False
+    data['runtime']=dict(state='running',at=data['generated_at'],reference='ses_fixture',provenance='docket.running_sample')
+    (tmp_path/'projection.json').write_text(json.dumps(data))
+    (tmp_path/'manifest.json').write_text(json.dumps(dict(version=1,projects=[p],inventory=dict(complete=False,observed_at=data['generated_at'],provenance='Refresh unavailable'))))
+    app=web.Application(); pages.install(app)
+    async with TestClient(TestServer(app)) as client:
+        body=await (await client.get('/tower/projects/p_demo?file=knowledge')).text()
+        assert 'Project files unavailable' in body and 'todo-1' not in body
+        assert 'Lead runtime: unknown' in body
+        assert 'inventory incomplete' in body
+        p['content_available']=True
+        (tmp_path/'manifest.json').write_text(json.dumps(dict(version=1,projects=[p])))
+        (tmp_path/'LEAD.md').write_text('access_token=private-fixture-canary')
+        response=await client.get('/tower/projects/p_demo?file=lead')
+        body=await response.text()
+        assert 'private-fixture-canary' not in body and 'Selected file unavailable' in body
+        policy=response.headers['Content-Security-Policy']
+        for value in ("default-src 'none'","script-src 'self'","base-uri 'none'","form-action 'self'"):
+            assert value in policy
+        assert response.headers['X-Content-Type-Options']=='nosniff'
+
+
+def test_precise_answer_time_parser_preserves_original_receipt():
+    at='2026-01-01T00:00:00.123456789Z'
+    assert schema.stamp(at).microsecond==123456
+    data=dict(version=1,project_id='p',outcome_id='o',generated_at='2026-01-02T00:00:00Z',activity=[dict(id='nod_receipt',project_id='p',outcome_id='o',kind='decision',at=at,label='Design choice answered',reference='Opaque receipt',provenance='Normal Nod decision-json read')])
+    schema.projection(data,dict(id='p',outcome_id='o'))
+    assert data['activity'][0]['at']==at

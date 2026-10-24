@@ -41,7 +41,8 @@ def stamp(value):
         text(value, 40)
         if not re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?(?:Z|[+-]\d\d:\d\d)', value):
             return None
-        parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        parser_value = re.sub(r'\.(\d{1,9})(?=Z|[+-])', lambda m: '.'+m[1][:6].ljust(6,'0'), value)
+        parsed = datetime.fromisoformat(parser_value.replace('Z', '+00:00'))
         return parsed if 2000 <= parsed.year <= 2100 else None
     except (ValueError, TypeError):
         return None
@@ -85,7 +86,9 @@ def evidence(data):
 def project(p):
     json_depth(p)
     obj(p)
-    keys(p, 'id outcome_id title status root header_file files images export')
+    keys(p, 'id outcome_id title status root header_file files images export content_available')
+    if 'content_available' in p and type(p['content_available']) is not bool:
+        raise ValueError('invalid content availability')
     for key in ('id', 'outcome_id'):
         ident(p.get(key))
     text(p.get('title'), 200)
@@ -144,7 +147,7 @@ def projection(data, p):
             if s['state']=='running' and (s['provenance']!='docket.running_sample' or not ident(s['reference']).startswith('ses_')):
                 raise ValueError('unverified busy sample')
     files=set()
-    for f in seq(data.get('file_updates', []), 100):
+    for f in seq(data.get('file_updates', []), 200):
         keys(f,'id at reference provenance'); fid=ident(f.get('id')); evidence(f)
         if fid in files or time(f.get('at'))>generated:
             raise ValueError('invalid file update')
