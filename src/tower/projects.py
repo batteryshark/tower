@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from aiohttp import web
+from . import project_schema as schema
 
 LIMIT = 512 * 1024
 ID = re.compile(r'^[A-Za-z0-9_-]{1,80}$')
@@ -19,7 +20,10 @@ HEADERS = {'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
 
 
 def read_file(root, relative, suffixes, limit=LIMIT):
-    """No-follow dirfds prevent both symlink escapes and check/open races."""
+    """No-follow opens beneath an operator-controlled canonical root.
+
+    Root ancestors must remain trusted; this is not universal TOCTOU protection.
+    """
     path = Path(relative)
     root = Path(root)
     if root.resolve() != root.absolute():
@@ -38,7 +42,7 @@ def read_file(root, relative, suffixes, limit=LIMIT):
         child = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
         with os.fdopen(child, 'rb') as stream:
             info = os.fstat(stream.fileno())
-            if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > limit:
                 raise ValueError('not bounded regular file')
             data = stream.read(limit + 1)
             if len(data) > limit:
@@ -49,11 +53,7 @@ def read_file(root, relative, suffixes, limit=LIMIT):
 
 
 def stamp(value):
-    try:
-        parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
-        return parsed if parsed.tzinfo else None
-    except (ValueError, TypeError, AttributeError):
-        return None
+    return schema.stamp(value)
 
 
 def esc(value):
@@ -77,11 +77,19 @@ def markdown(source, images):
     Raw HTML is escaped. Local images must match an explicit approved mapping.
     """
     def inline(value):
+        def emphasis(raw):
+            safe = esc(raw)
+            safe = re.sub(r'`([^`\n]+)`', r'<code>\1</code>', safe)
+            safe = re.sub(r'\*\*([^*\n]+)\*\*', r'<strong>\1</strong>', safe)
+            return re.sub(r'(?<!\*)\*([^*\n]+)\*(?!\*)', r'<em>\1</em>', safe)
         parts, cursor = [], 0
         for match in re.finditer(r'(!?)\[([^\]\n]*)\]\(([^\s)]+)\)', value):
-            parts.append(esc(value[cursor:match.start()]))
+            parts.append(emphasis(value[cursor:match.start()]))
             image, label, target = match.groups()
-            url = urlsplit(target)
+            try:
+                url = urlsplit(target)
+            except ValueError:
+                url = urlsplit('')
             if image and target in images:
                 parts.append(f'<img alt="{esc(label)}" src="{esc(images[target])}" loading="lazy">')
             elif not image and url.scheme in ('https', 'http') and url.netloc and not url.username:
@@ -89,20 +97,47 @@ def markdown(source, images):
             else:
                 parts.append(esc(label))
             cursor = match.end()
-        return ''.join(parts) + esc(value[cursor:])
-    out, code = [], False
-    for line in source.splitlines():
+        return ''.join(parts) + emphasis(value[cursor:])
+    out, code, listing = [], False, None
+    lines = source.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        index += 1
+        match = re.match(r'^\s*(?:(\d+)\. |([-*]) )(.*)$', line)
+        if listing and (not match or ('ol' if match[1] else 'ul') != listing):
+            out.append(f'</{listing}>')
+            listing = None
         if line.startswith('```'):
             out.append('</code></pre>' if code else '<pre><code>')
             code = not code
         elif code:
             out.append(esc(line) + '\n')
+        elif '|' in line and index < len(lines) and re.fullmatch(r'\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*', lines[index]):
+            def cells(row, tag):
+                return '<tr>' + ''.join(f'<{tag}>' + inline(c.strip()) + f'</{tag}>' for c in row.strip().strip('|').split('|')) + '</tr>'
+            out.append('<div class="table-scroll"><table><thead>' + cells(line, 'th') + '</thead><tbody>')
+            index += 1
+            while index < len(lines) and '|' in lines[index] and lines[index].strip():
+                out.append(cells(lines[index], 'td'))
+                index += 1
+            out.append('</tbody></table></div>')
         elif re.match(r'^#{1,6} ', line):
             level = len(line.split(' ', 1)[0])
             out.append(f'<h{level}>' + inline(line[level+1:]) + f'</h{level}>')
+        elif match:
+            kind = 'ol' if match[1] else 'ul'
+            if not listing:
+                out.append(f'<{kind}>')
+                listing = kind
+            content = match[3]
+            task = re.match(r'^\[([ xX])\] (.*)$', content)
+            if task:
+                content = task[2]
+            out.append('<li>' + ('<input type="checkbox" disabled' + (' checked' if task[1].lower() == 'x' else '') + '>' if task else '') + inline(content) + '</li>')
         elif line.strip():
-            out.append('<p>' + ('• ' if line.startswith(('- ', '* ')) else '') + inline(line[2:] if line.startswith(('- ', '* ')) else line) + '</p>')
-    return ''.join(out) + ('</code></pre>' if code else '')
+            out.append('<p>' + inline(line) + '</p>')
+    return ''.join(out) + (f'</{listing}>' if listing else '') + ('</code></pre>' if code else '')
 
 
 class Projects:
@@ -114,27 +149,29 @@ class Projects:
             return [], 'Project manifest unavailable — operator configuration required.'
         path = Path(self.manifest)
         data = json.loads(read_file(path.parent, path.name, {'.json'}))
-        if data['version'] != 1 or len(data['projects']) > 100:
-            raise ValueError('invalid manifest')
+        schema.version(data)
+        schema.keys(data, 'version projects')
+        schema.seq(data.get('projects'), 100)
         ids = set()
+        projects = []
         for p in data['projects']:
-            if not ID.fullmatch(p['id']) or p['id'] in ids or not Path(p['root']).is_absolute():
-                raise ValueError('invalid project')
-            ids.add(p['id'])
-            for group in ('files', 'images'):
-                entries = p.get(group, [])
-                if len(entries) > 100 or len({e['id'] for e in entries}) != len(entries) or any(not ID.fullmatch(e['id']) or e['id'] == 'knowledge' for e in entries):
-                    raise ValueError('invalid file IDs')
-        return data['projects'], ''
+            try:
+                schema.project(p)
+                if p['id'] in ids:
+                    raise ValueError('duplicate project ID')
+                ids.add(p['id'])
+                projects.append(p)
+            except (ValueError, TypeError, RecursionError):
+                # Retain an explicit unavailable row, but no file/export access.
+                projects.append({'id': '', 'title': 'Unavailable project entry', '_invalid': True})
+        return projects, ''
 
     def projection(self, p):
         try:
             e = p['export']
             data = json.loads(read_file(e['root'], e['path'], {'.json'}))
-            if data['version'] != 1 or data['project_id'] != p['id'] or data['outcome_id'] != p['outcome_id'] or not stamp(data['generated_at']):
-                raise ValueError('projection mismatch')
-            return data, ''
-        except (KeyError, ValueError, OSError, TypeError):
+            return schema.projection(data, p), ''
+        except (KeyError, ValueError, OSError, TypeError, RecursionError):
             return {}, 'Knowledge / acceptance projection unavailable or invalid.'
 
     def activity(self, p, data):
@@ -144,10 +181,19 @@ class Projects:
                 and stamp(e.get('at')) and e.get('provenance') and e.get('reference')]
 
     def summary(self, p, data):
-        fields = {}
+        try:
+            schema.projection(data, p)
+        except (KeyError, ValueError, TypeError, RecursionError):
+            data = {}
+        fields = {k: v for k, v in data.get('summary', {}).items()
+                  if k in ('usable now', 'left', 'waiting on', 'handed to')}
+        fields['_source'] = ('Snapshot: ' + data['summary']['provenance'] + ' · ' + data['summary']['reference'] + ' · observed ' + data['summary']['observed_at']) if 'summary' in data else 'Unreported'
         try:
             f = next(f for f in p.get('files', []) if f['id'] == p.get('header_file'))
-            fields = header(read_file(f.get('root', p['root']), f['path'], {'.md'}).decode())
+            current = header(read_file(f.get('root', p['root']), f['path'], {'.md'}).decode())
+            fields.update(current)
+            if current:
+                fields['_source'] += ' · Current header: ' + f['id'] + ' (takes priority)'
         except (StopIteration, ValueError, OSError, UnicodeError):
             pass
         a = data.get('acceptance', {})
@@ -195,7 +241,7 @@ class Projects:
             else:
                 raise ValueError('invalid raster')
             return web.Response(body=data, content_type=mime, headers=HEADERS)
-        except (KeyError, StopIteration, ValueError, OSError, TypeError):
+        except (KeyError, StopIteration, ValueError, OSError, TypeError, RecursionError):
             raise web.HTTPNotFound()
 
     async def page(self, request):
@@ -203,13 +249,27 @@ class Projects:
             projects, error, selected = self.selected(request)
             body, feed = (f'<p>{esc(error)}</p>' if error else ''), []
             for p in ([selected] if selected else projects):
+                if p.get('_invalid'):
+                    body += '<section class="project-row">Unavailable project entry — malformed configuration.</section>'
+                    continue
                 data, unavailable = self.projection(p)
                 fields = self.summary(p, data)
-                body += f'<section><h2><a href="/tower/projects/{p["id"]}">{esc(p["title"])}</a></h2><dl>'
+                body += f'<section class="project-row"><a class="project-name" href="/tower/projects/{p["id"]}">{esc(p["title"])}</a>'
+                if selected:
+                    body += '<dl>'
                 for key in ('status', 'usable now', 'left', 'waiting on', 'acceptance', 'handed to', 'last landed'):
-                    body += f'<div><dt>{esc(key)}</dt><dd>{esc(fields.get(key))}</dd></div>'
-                body += '</dl><small>Header: ' + esc(p.get('header_file')) + ' · outcome ' + esc(p['outcome_id']) + ' · projection as of ' + esc(data.get('generated_at')) + '</small></section>'
-                feed.extend(self.activity(p, data))
+                    value = fields.get(key)
+                    if selected:
+                        body += f'<div><dt>{esc(key)}</dt><dd>{esc(value)}</dd></div>'
+                    else:
+                        excerpt = str(value if value is not None else 'Unreported')
+                        body += f'<span class="summary-cell" title="{esc(excerpt)}"><b>{esc(key)}:</b> {esc(excerpt[:100])}' + ('…' if len(excerpt) > 100 else '') + '</span>'
+                if selected:
+                    body += '</dl><small>' + esc(fields['_source']) + ' · outcome ' + esc(p['outcome_id']) + ' · projection as of ' + esc(data.get('generated_at')) + '</small>'
+                body += '</section>'
+                if unavailable and not selected:
+                    body += '<small>' + esc(p['title']) + ': ' + esc(unavailable) + '</small>'
+                feed.extend(dict(e, project_title=p['title']) for e in self.activity(p, data))
                 if selected:
                     body += f'<p role="status">{esc(unavailable)}</p>' if unavailable else ''
                     body += self.files(p, data, request.query.get('file'))
@@ -219,19 +279,21 @@ class Projects:
             recent = sorted((e for e in feed if now-timedelta(hours=6) <= stamp(e['at']) <= now), key=lambda e: stamp(e['at']), reverse=True)
             seen = set()
             for e in recent:
-                if e['id'] in seen:
+                event_key = (e['project_id'], e['id'])
+                if event_key in seen:
                     continue
-                seen.add(e['id'])
-                body += '<section>' + esc(e['kind']) + ' · ' + esc(e['at']) + '<p>' + esc(e.get('label')) + '</p><small>' + esc(e['reference']) + ' · ' + esc(e['provenance']) + '</small></section>'
+                seen.add(event_key)
+                body += '<section>' + esc(e['project_title']) + ' · ' + esc(e['kind']) + ' · ' + esc(e['at']) + '<p>' + esc(e.get('label')) + '</p><small>' + esc(e['reference']) + ' · ' + esc(e['provenance']) + '</small></section>'
             if not recent:
                 body += '<p>No reported semantic activity in this window.</p>'
             css = Path(__file__).with_name('viewer.html').read_text().split('<style>')[1].split('</style>')[0]
             css += 'a{color:var(--accent)} section{background:var(--card);padding:12px;border-radius:10px;margin:8px 0} dl{margin:0} dl>div{display:grid;grid-template-columns:9rem 1fr;gap:8px} dt{color:var(--muted)} dd{margin:0} p,dd,small{overflow-wrap:anywhere} img{max-width:100%;height:auto} select{max-width:100%;font:inherit} article{min-width:0} @media(max-width:420px){dl>div{grid-template-columns:6rem 1fr}}'
+            css += '.project-row{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline}.project-name{font-weight:650}.summary-cell{font-size:12px;overflow-wrap:anywhere;min-width:0}.project-row dl,.project-row small{width:100%}.table-scroll{overflow-x:auto}table{border-collapse:collapse}td,th{padding:4px 8px;border:1px solid var(--line)}article p{margin:6px 0}'
             document = '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Tower projects</title><style>' + css + '</style><header><h1>Tower projects</h1><nav><a href="/tower/">Events</a> · <a href="/tower/projects/">All projects</a></nav></header><main>' + body + '</main></html>'
             if len(document.encode()) > 2 * 1024 * 1024:
                 raise ValueError('response too large')
             return web.Response(text=document, content_type='text/html', headers=HEADERS)
-        except (KeyError, ValueError, OSError, TypeError, UnicodeError):
+        except (KeyError, ValueError, OSError, TypeError, UnicodeError, RecursionError):
             return web.Response(text='Project configuration unavailable or invalid.', status=503, headers=HEADERS)
 
     def files(self, p, data, chosen):
@@ -256,9 +318,11 @@ class Projects:
                 root, images = f.get('root', p['root']), {}
                 if root == p['root']:
                     for image in p.get('images', []):
+                        if Path(image['path']).suffix.lower() not in ('.png', '.jpg', '.jpeg', '.gif', '.webp'):
+                            continue
                         rel = os.path.relpath(image['path'], str(Path(f['path']).parent))
-                        if '..' not in Path(rel).parts:
-                            images[rel] = f'/tower/projects/{p["id"]}/images/{image["id"]}'
+                        # Relative reference is only a lookup key, never passed to read_file.
+                        images[rel] = f'/tower/projects/{p["id"]}/images/{image["id"]}'
                 body += markdown(read_file(root, f['path'], {'.md'}).decode(), images)
             except (ValueError, OSError, UnicodeError):
                 body += '<p>Selected file unavailable or not permitted.</p>'

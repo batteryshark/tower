@@ -16,7 +16,7 @@ def fixture(tmp_path):
          'export': {'root': str(tmp_path), 'path': 'projection.json'}}
     data = {'version': 1, 'project_id': 'p_demo', 'outcome_id': 'o2',
             'generated_at': datetime.now(timezone.utc).isoformat(),
-            'knowledge': {'state': 'available', 'items': [{'id': 'todo-1', 'kind': 'todo', 'title': 'Task', 'body': 'Details', 'completed': False}]}}
+            'knowledge': {'state': 'available', 'provenance': 'supported API', 'items': [{'id': 'todo-1', 'kind': 'todo', 'title': 'Task', 'body': 'Details', 'completed': False}]}}
     (tmp_path / 'projection.json').write_text(json.dumps(data))
     manifest = tmp_path / 'manifest.json'
     manifest.write_text(json.dumps({'version': 1, 'projects': [p]}))
@@ -29,7 +29,7 @@ def test_header_and_outcome(fixture):
     assert pages.summary(p, data)['acceptance'] == 'unreported'
     data['acceptance'] = {'state': 'accepted', 'request_state': 'pending'}
     assert pages.summary(p, data)['acceptance'] == 'unreported'
-    data['acceptance'].update(request_state='answered', request_id='r', provenance='Nod', answer={'id': 'a', 'value': 'Accept', 'answered_at': data['generated_at']})
+    data['acceptance'].update(project_id='p_demo', outcome_id='o2', reference='outcome', request_state='answered', requested_at=data['generated_at'], request_id='r', provenance='Nod', answer={'id': 'a', 'type': 'nod.answer', 'project_id': 'p_demo', 'outcome_id': 'o2', 'request_id': 'r', 'reference': 'answer', 'provenance': 'Nod', 'value': 'Accept', 'answered_at': data['generated_at']})
     assert pages.summary(p, data)['acceptance'] == 'accepted'
     p['outcome_id'] = 'o3'
     assert pages.projection(p)[0] == {}
