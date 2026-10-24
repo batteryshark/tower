@@ -83,6 +83,8 @@ class Viewer:
         self._closing = asyncio.Event()
 
     def install(self, app: web.Application) -> None:
+        from .projects import Projects
+        Projects().install(app)
         app.router.add_get("/tower", self._redirect)
         app.router.add_get("/tower/", self._page)
         app.router.add_get("/tower/events", self._events)
