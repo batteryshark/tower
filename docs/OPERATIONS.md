@@ -101,9 +101,10 @@ The tool, dry run unless `--execute`; it never restarts anything and prints the 
 
 ```sh
 tower admin nats-users plan                       # paths, users, ACLs; no values
-tower admin nats-users apply [--execute]          # backup-<ts>/, missing password files, auth.conf, client.json mode user
+tower admin nats-users apply [--execute]          # backup-<ts>/, missing password files, auth.conf (not client.json)
+tower admin nats-users switch-clients [--execute] # client.json mode user; only after the nats restart
 tower admin nats-users rollback [--execute]       # newest token auth.conf backup back, client.json mode token
-tower admin nats-users verify [--expect tower,docket]   # the S1 f checks, in order
+tower admin nats-users verify [--stage s1|s2]     # the checks, in order
 ```
 
 `apply` is idempotent: a second run changes nothing. It copies `nats.conf` and `auth.conf` into
@@ -117,18 +118,25 @@ automatic repeat.
 
 a. Preconditions: Docket's publisher can use user `docket`, a password file by path and inbox prefix
    `_INBOX_docket` (inert until e); Nod's publisher is off. `tower admin nats-users plan` shows the expected changes.
-b. `tower admin nats-users apply --execute`. From here, NEW Tower connections use user `tower` and are refused
-   until c; running ones are unaffected. Keep b to d short.
-c. `nats-server -c ~/.tower/nats/nats.conf -t` (must pass), then `fleet restart nats`. All token clients drop and
-   are refused from now on.
-d. `fleet restart tower-host`; it reconnects as `tower` through client.json.
+b. Nothing yet: `apply` and the restarts all happen in c, so Tower clients are never pointed at users before the
+   server has them.
+c. In one go, in this order:
+   1. `tower admin nats-users apply --execute` (backs up, creates the password files, writes `auth.conf`; client.json
+      is untouched, so Tower clients keep using the token for now).
+   2. `nats-server -c ~/.tower/nats/nats.conf -t` (must pass).
+   3. `fleet restart nats`. All token clients drop and are refused from now on.
+   4. `tower admin nats-users switch-clients --execute` (client.json mode user).
+d. `fleet restart tower-host`; it reconnects as `tower` through client.json. The gap where Tower clients cannot
+   connect is c3 to c4 for the CLI and c3 to d for the host.
 e. The Docket lead restarts Docket as user `docket` with `~/.tower/secrets/docket.password`.
 f. Verify:
-   1. `tower admin nats-users verify --expect tower,docket` prints `ok` for: tower connects through client.json and
-      reads the stream; the token is refused; the active users are exactly `tower` and `docket`, with no connection
-      lacking a user (several `tower` connections are fine).
-   2. `curl -s http://127.0.0.1:8796/health` is 200 and `tower handlers` lists every handler running.
-   3. The next real Docket fire lands in TOWER (`tower watch ev.docket.> --since 10m`).
+   1. `tower admin nats-users verify --stage s1` prints `ok` for, in order: configured users are exactly
+      tower, docket and nod; the token is refused; tower connects through client.json and reads the stream; among
+      active connections `tower` is present, `nod` is NOT (before S2), nothing else and none without a user. Docket
+      may be absent: its publisher connects only for each publish.
+   2. Docket's proof: one Docket fire lands on TOWER after the switch: `tower watch 'ev.docket.>' --since 30m`
+      shows a fire newer than the nats restart.
+   3. `curl -s http://127.0.0.1:8796/health` is 200 and `tower handlers` lists every handler running.
 
 Rollback (once, then HOLD):
 
@@ -142,8 +150,7 @@ Rollback (once, then HOLD):
 ### S2: Nod's publisher on
 
 The Nod lead configures Nod's publisher with user `nod`, the `nod-publisher.password` file and inbox prefix
-`_INBOX_nod`; it publishes with `Nats-Expected-Stream: TOWER`. Then `tower admin nats-users verify --expect
-tower,docket,nod`. Nod may publish only `ev.nod.>` and subscribe only `_INBOX_nod.>`.
+`_INBOX_nod`; it publishes with `Nats-Expected-Stream: TOWER`. Then `tower admin nats-users verify --stage s2`. Nod may publish only `ev.nod.>` and subscribe only `_INBOX_nod.>`.
 
 ## Rollback
 

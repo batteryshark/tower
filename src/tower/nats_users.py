@@ -1,8 +1,10 @@
 """`tower admin nats-users`: move the bus from the shared token to per-producer users. Idempotent; dry run by default.
 
     tower admin nats-users plan                 what apply would change (paths, users, ACLs; never values)
-    tower admin nats-users apply [--execute]    back up, create missing password files, write auth.conf, client.json
+    tower admin nats-users apply [--execute]    back up, create missing password files, write auth.conf
+    tower admin nats-users switch-clients [--execute]   client.json mode user (run after the nats restart)
     tower admin nats-users rollback [--execute] restore the newest token auth.conf backup, client.json mode token
+    tower admin nats-users verify [--stage s1|s2]   the window checks, in order
 
 Without --execute, apply and rollback only print their plan. Nothing here restarts a service: each prints the restart
 order. Paths are under TOWER_HOME (default ~/.tower): nats/{nats.conf,auth.conf,client.json}, nats/backup-<ts>/,
@@ -15,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -79,13 +82,14 @@ class Paths:
         return sorted(self.nats.glob("backup-*"), reverse=True)
 
 
-RESTART_APPLY = """Restart order (nothing was restarted):
-  1. nats-server -c {conf} -t                 check the config
-  2. fleet restart nats                       token clients are refused from here on
-  3. fleet restart tower-host                 reconnects as user tower (client.json)
-  4. Docket: restart with user docket, {docket}, inbox prefix _INBOX_docket (Docket lead)
-  5. Nod: restart its publisher with user nod, {nod}, inbox prefix _INBOX_nod (Nod lead)
-  6. verify (docs/OPERATIONS.md, Per-producer users)"""
+RESTART_APPLY = """Next, in order (nothing was restarted):
+  1. nats-server -c {conf} -t                         check the config
+  2. fleet restart nats                               token clients are refused from here on
+  3. tower admin nats-users switch-clients --execute  client.json mode user
+  4. fleet restart tower-host                         reconnects as user tower
+  5. Docket: user docket, {docket}, inbox prefix _INBOX_docket (Docket lead)
+  6. tower admin nats-users verify --stage s1; one Docket fire lands on TOWER
+  Nod (S2, later): user nod, {nod}, inbox prefix _INBOX_nod (Nod lead)"""
 
 RESTART_ROLLBACK = """Restart order (nothing was restarted):
   1. nats-server -c {conf} -t
@@ -162,11 +166,25 @@ def plan(paths: Paths) -> list[str]:
         out += [f"  {u.name}: {acl(u)}" for u in USERS]
     else:
         out.append(f"{paths.auth}: already per-user, unchanged")
-    client = {"mode": "user", "user": "tower", "password_file": str(paths.password(USERS[0]))}
-    current = _read_json(paths.client)
-    out.append(f"{paths.client}: " + ("unchanged (mode user, tower)" if current == client
-                                      else "write mode user, user tower (0600)"))
+    out.append(f"{paths.client}: not written by apply (switch-clients, after the nats restart)")
     return out
+
+
+def client_pointer(paths: Paths) -> dict:
+    return {"mode": "user", "user": "tower", "password_file": str(paths.password(USERS[0]))}
+
+
+def switch_clients(paths: Paths, *, execute: bool = False) -> list[str]:
+    """Point Tower clients at user tower. Only once auth.conf is per-user (after apply and the nats restart)."""
+    if not _is_generated(paths.auth) or not paths.password(USERS[0]).exists():
+        raise UsersError("auth.conf is not per-user yet: run apply --execute first")
+    if _read_json(paths.client) == client_pointer(paths):
+        return ["nothing to change" if execute else "DRY RUN (add --execute):",
+                f"{paths.client}: already mode user, tower"]
+    if not execute:
+        return ["DRY RUN (add --execute):", f"{paths.client}: write mode user, user tower (0600)"]
+    _write_private(paths.client, json.dumps(client_pointer(paths), indent=1) + "\n")
+    return [f"wrote {paths.client} (mode user)", "", "Next: fleet restart tower-host, then verify --stage s1"]
 
 
 def apply(paths: Paths, *, execute: bool = False) -> list[str]:
@@ -195,10 +213,6 @@ def apply(paths: Paths, *, execute: bool = False) -> list[str]:
         hashes = {u.name: _hash(paths.password(u).read_text().strip()) for u in USERS}
         _write_private(paths.auth, render_auth(hashes))
         done.append(f"wrote {paths.auth} ({len(USERS)} users)")
-    client = {"mode": "user", "user": "tower", "password_file": str(paths.password(USERS[0]))}
-    if _read_json(paths.client) != client:
-        _write_private(paths.client, json.dumps(client, indent=1) + "\n")
-        done.append(f"wrote {paths.client} (mode user)")
     if not done:
         done.append("nothing to change")
     return done + ["", RESTART_APPLY.format(conf=paths.conf, docket=paths.password(USERS[1]),
@@ -254,9 +268,22 @@ def _read_json(path: Path):
 # -- verify (read-only checks, in order) ------------------------------------------------
 
 
-async def verify(paths: Paths, expect: tuple[str, ...], *, url: str | None = None,
+def configured_users(paths: Paths) -> list[str]:
+    """User names in auth.conf (as generated by apply)."""
+    try:
+        text = paths.auth.read_text()
+    except OSError:
+        return []
+    return sorted(re.findall(r'\{user: "([^"]+)"', text))
+
+
+async def verify(paths: Paths, stage: str = "s1", *, url: str | None = None,
                  monitor: str = "http://127.0.0.1:8222") -> list[tuple[str, bool, str]]:
-    """The window checks, in the recorded order; stops at the first failure. Returns (check, ok, detail)."""
+    """The window checks, in the recorded order; stops at the first failure. Returns (check, ok, detail).
+
+    Docket may be absent (its publisher connects per publish); its proof is one Docket fire landing on TOWER.
+    Before S2 the nod user must not be active.
+    """
     import asyncio
     import urllib.request
 
@@ -264,6 +291,8 @@ async def verify(paths: Paths, expect: tuple[str, ...], *, url: str | None = Non
 
     from . import bus
 
+    if stage not in ("s1", "s2"):
+        raise UsersError("stage must be s1 or s2")
     url = url or os.environ.get("TOWER_NATS_URL") or bus.DEFAULT_URL
     results: list[tuple[str, bool, str]] = []
 
@@ -271,18 +300,9 @@ async def verify(paths: Paths, expect: tuple[str, ...], *, url: str | None = Non
         results.append((check, ok, detail))
         return ok
 
-    # 1. Tower connects as user tower through client.json and can read the stream.
-    try:
-        nc = await bus.connect(url, client_config=str(paths.client), allow_reconnect=False,
-                               max_reconnect_attempts=0)
-        try:
-            info = await nc.jetstream().stream_info(bus.STREAM)
-            ok = done("tower via client.json", True, f"stream {bus.STREAM} {info.state.messages} msgs")
-        finally:
-            await nc.close()
-    except Exception as exc:  # noqa: BLE001
-        ok = done("tower via client.json", False, exc.__class__.__name__)
-    if not ok:
+    # 1. Configured users are exactly tower, docket and nod.
+    names, want = configured_users(paths), sorted(u.name for u in USERS)
+    if not done("configured users", names == want, f"{','.join(names) or '-'} (expected {','.join(want)})"):
         return results
 
     # 2. The shared token is refused.
@@ -301,18 +321,42 @@ async def verify(paths: Paths, expect: tuple[str, ...], *, url: str | None = Non
     if not ok:
         return results
 
-    # 3. Active connections: only the expected users, and none without a user (no token clients).
+    # 3. Tower's client.json works: connect as user tower and read the stream.
+    try:
+        nc = await bus.connect(url, client_config=str(paths.client), allow_reconnect=False,
+                               max_reconnect_attempts=0)
+        try:
+            info = await nc.jetstream().stream_info(bus.STREAM)
+            ok = done("tower via client.json", True, f"stream {bus.STREAM} {info.state.messages} msgs")
+        finally:
+            await nc.close()
+    except Exception as exc:  # noqa: BLE001
+        ok = done("tower via client.json", False, exc.__class__.__name__)
+    if not ok:
+        return results
+
+    # 4. Active connections (ours above is closed): tower active, nod not before S2, docket optional,
+    #    nobody else and no connection without a user.
     try:
         with urllib.request.urlopen(f"{monitor.rstrip('/')}/connz?auth=1&limit=1024", timeout=5) as response:
             conns = json.load(response).get("connections") or []
     except Exception as exc:  # noqa: BLE001
         done("active users", False, f"monitor unreadable ({exc.__class__.__name__})")
         return results
-    users = sorted({c.get("authorized_user") for c in conns if c.get("authorized_user")})
+    active = sorted({c.get("authorized_user") for c in conns if c.get("authorized_user")})
     anonymous = sum(1 for c in conns if not c.get("authorized_user"))
-    ok = set(users) == set(expect) and anonymous == 0
-    done("active users", ok, f"users {','.join(users) or '-'} (expected {','.join(expect)}), "
-                             f"{anonymous} without a user, {len(conns)} connections")
+    allowed = {"tower", "docket"} | ({"nod"} if stage == "s2" else set())
+    problems = []
+    if "tower" not in active:
+        problems.append("tower not active")
+    if stage == "s1" and "nod" in active:
+        problems.append("nod active before S2")
+    if set(active) - allowed - {"nod"}:
+        problems.append("unexpected users")
+    if anonymous:
+        problems.append(f"{anonymous} without a user")
+    done("active users", not problems,
+         f"{','.join(active) or '-'} active, {len(conns)} connections" + (f": {'; '.join(problems)}" if problems else ""))
     return results
 
 

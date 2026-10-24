@@ -173,15 +173,27 @@ def test_apply_is_idempotent_and_touches_nothing_else(home):
     assert auth.startswith(nu.MARKER) and mode_of(home.auth) == 0o600 and auth.count('password: "$2') == 3
     assert not any(pw in auth for pw in passwords.values())
     assert not any(pw in "\n".join(out) for pw in passwords.values())
-    assert json.loads(home.client.read_text()) == {"mode": "user", "user": "tower",
-                                                   "password_file": str(home.password(nu.USERS[0]))}
-    assert mode_of(home.client) == 0o600
+    assert not home.client.exists()  # apply never switches clients
     assert {p: (digest(p), mode_of(p)) for p in untouched} == untouched
 
     auth_digest = digest(home.auth)
     again = nu.apply(home, execute=True)
     assert again[0] == "nothing to change" and len(home.backups()) == 1 and digest(home.auth) == auth_digest
     assert {u.name: home.password(u).read_text().strip() for u in nu.USERS} == passwords
+    assert not home.client.exists()
+
+
+def test_switch_clients_is_its_own_step(home):
+    with pytest.raises(nu.UsersError, match="apply --execute first"):
+        nu.switch_clients(home, execute=True)
+    nu.apply(home, execute=True)
+    assert nu.switch_clients(home)[0].startswith("DRY RUN") and not home.client.exists()
+    assert nu.switch_clients(home, execute=True)[0].startswith("wrote")
+    assert json.loads(home.client.read_text()) == {"mode": "user", "user": "tower",
+                                                   "password_file": str(home.password(nu.USERS[0]))}
+    assert mode_of(home.client) == 0o600
+    assert nu.switch_clients(home, execute=True)[0] == "nothing to change"
+    assert "switch-clients --execute" in "\n".join(nu.apply(home, execute=True))
 
 
 async def test_users_acls_token_refusal_and_rollback(home, server, monkeypatch):
@@ -194,6 +206,7 @@ async def test_users_acls_token_refusal_and_rollback(home, server, monkeypatch):
     nu.apply(home, execute=True)
     subprocess.run([NATS_SERVER, "-c", str(home.conf), "-t"], check=True, capture_output=True)
     server.restart()
+    nu.switch_clients(home, execute=True)
     pw = {u.name: home.password(u).read_text().strip() for u in nu.USERS}
 
     # The token is refused.
@@ -234,18 +247,26 @@ async def test_users_acls_token_refusal_and_rollback(home, server, monkeypatch):
     assert all("ermission" in e for e in errors)
     assert not [s for s in got if s == "ev.docket.x"]
 
-    # verify: tower and docket are the only active users; a nod connection makes it fail.
-    docket = await nats.connect(server.url, user="docket", password=pw["docket"], inbox_prefix="_INBOX_docket")
+    # verify: only tower connected passes (docket's publisher connects per publish); nod before S2 fails.
     await nod.close()
     await asyncio.sleep(0.2)
-    results = await nu.verify(home, ("tower", "docket"), url=server.url, monitor=f"http://127.0.0.1:{server.monitor}")
-    assert [r[:2] for r in results] == [("tower via client.json", True), ("token refused", True),
-                                        ("active users", True)]
+    monitor = f"http://127.0.0.1:{server.monitor}"
+    results = await nu.verify(home, "s1", url=server.url, monitor=monitor)
+    assert [r[:2] for r in results] == [("configured users", True), ("token refused", True),
+                                        ("tower via client.json", True), ("active users", True)]
+    docket = await nats.connect(server.url, user="docket", password=pw["docket"], inbox_prefix="_INBOX_docket")
+    await asyncio.sleep(0.2)
+    assert (await nu.verify(home, "s1", url=server.url, monitor=monitor))[-1][1] is True
     nod = await nats.connect(server.url, user="nod", password=pw["nod"], inbox_prefix="_INBOX_nod")
     await asyncio.sleep(0.2)
-    results = await nu.verify(home, ("tower", "docket"), url=server.url, monitor=f"http://127.0.0.1:{server.monitor}")
-    assert results[-1][:2] == ("active users", False) and "nod" in results[-1][2]
-    for conn in (tower, docket, nod):
+    results = await nu.verify(home, "s1", url=server.url, monitor=monitor)
+    assert results[-1][:2] == ("active users", False) and "nod active before S2" in results[-1][2]
+    assert (await nu.verify(home, "s2", url=server.url, monitor=monitor))[-1][1] is True
+    await tower.close()
+    await asyncio.sleep(0.2)
+    results = await nu.verify(home, "s2", url=server.url, monitor=monitor)
+    assert results[-1][:2] == ("active users", False) and "tower not active" in results[-1][2]
+    for conn in (docket, nod):
         await conn.close()
 
     # Rollback restores token auth and points Tower back at the token.
@@ -274,6 +295,7 @@ def test_plain_cli_reads_the_pointer(home, server, tmp_path):
     token = (home.secrets / "nats.token").read_text().strip()
     nu.apply(home, execute=True)
     server.restart()
+    nu.switch_clients(home, execute=True)
     base = {"PATH": os.environ["PATH"], "HOME": str(home.home.parent)}  # no TOWER_* at all
 
     out = subprocess.run([sys.executable, "-m", "tower", "auth"], env=base, capture_output=True, text=True,
