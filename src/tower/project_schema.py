@@ -185,7 +185,10 @@ def projection(data, p):
                 raise ValueError('answer not bound to request')
             if not requested <= time(answer.get('answered_at')) <= generated:
                 raise ValueError('answer time order')
-            if {'accepted': 'Accept', 'not-yet': 'Not yet'}.get(state) != answer.get('value'):
+            value = answer.get('value')
+            if (state not in ('accepted', 'not-yet') or type(value) is not str
+                    or value not in ('Accept', 'Not yet')
+                    or {'accepted': 'Accept', 'not-yet': 'Not yet'}[state] != value):
                 raise ValueError('answer value/state mismatch')
         elif answer is not None or state in ('accepted', 'not-yet'):
             raise ValueError('no actual answer')

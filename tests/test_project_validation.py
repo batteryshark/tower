@@ -72,6 +72,43 @@ def test_answer_binding(tmp_path, key, value):
         schema.projection(data, p)
 
 
+@pytest.mark.parametrize('state', ['unfinished', 'finished-awaiting-acceptance', 'accepted', 'not-yet'])
+@pytest.mark.parametrize('value', ['missing', None, 'Accept', 'Not yet'])
+def test_answer_requires_terminal_state_and_value(tmp_path, state, value):
+    p, data, _ = sources(tmp_path)
+    data['acceptance']['state'] = state
+    if value == 'missing':
+        del data['acceptance']['answer']['value']
+    else:
+        data['acceptance']['answer']['value'] = value
+    if (state, value) in (('accepted', 'Accept'), ('not-yet', 'Not yet')):
+        assert schema.projection(data, p) is data
+    else:
+        with pytest.raises(ValueError, match='answer value/state mismatch'):
+            schema.projection(data, p)
+
+
+async def test_invalid_utf8_export_isolated(tmp_path):
+    p, data, manifest = sources(tmp_path)
+    (tmp_path / 'export.json').write_bytes(b'{"version":1,"bad":"\xff"}')
+    other = dict(p, id='p2', title='Valid Project', export={'root': str(tmp_path), 'path': 'good.json'})
+    good = copy.deepcopy(data)
+    good['project_id'] = 'p2'
+    good.pop('acceptance')
+    good['activity'] = []
+    good['summary']['left'] = 'GOOD PROJECT CONTENT'
+    (tmp_path / 'good.json').write_text(json.dumps(good))
+    manifest.write_text(json.dumps({'version': 1, 'projects': [p, other]}))
+    app = web.Application()
+    Projects(str(manifest)).install(app)
+    async with TestClient(TestServer(app)) as client:
+        response = await client.get('/tower/projects/')
+        body = await response.text()
+        assert response.status == 200
+        assert 'Project One' in body and 'projection unavailable or invalid' in body
+        assert 'Valid Project' in body and 'GOOD PROJECT CONTENT' in body
+
+
 @pytest.mark.parametrize('value', [0, 1, 'true', None, [], {}])
 def test_todo_bool(tmp_path, value):
     p, data, _ = sources(tmp_path)

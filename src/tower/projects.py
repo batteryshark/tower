@@ -171,7 +171,7 @@ class Projects:
             e = p['export']
             data = json.loads(read_file(e['root'], e['path'], {'.json'}))
             return schema.projection(data, p), ''
-        except (KeyError, ValueError, OSError, TypeError, RecursionError):
+        except (KeyError, ValueError, OSError, TypeError, UnicodeError, RecursionError):
             return {}, 'Knowledge / acceptance projection unavailable or invalid.'
 
     def activity(self, p, data):
