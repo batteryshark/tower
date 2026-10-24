@@ -6,7 +6,7 @@ import re
 import stat
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlencode
 
 from aiohttp import web
 from . import project_schema as schema
@@ -175,7 +175,7 @@ class Projects:
         data = json.loads(read_file(path.parent, path.name, {'.json'}))
         schema.version(data)
         schema.keys(data, 'version projects')
-        schema.seq(data.get('projects'), 100)
+        schema.seq(data.get('projects'), 1000)
         ids = set()
         projects = []
         for p in data['projects']:
@@ -201,7 +201,7 @@ class Projects:
     def activity(self, p, data):
         return [e for e in data.get('activity', [])[:500] if isinstance(e, dict)
                 and e.get('project_id') == p['id'] and e.get('outcome_id') == p['outcome_id']
-                and e.get('id') and e.get('kind') in ('landing', 'acceptance', 'decision', 'handoff')
+                and e.get('id') and e.get('kind') in ('landing', 'acceptance', 'decision', 'handoff', 'status')
                 and stamp(e.get('at')) and e.get('provenance') and e.get('reference')]
 
     def summary(self, p, data):
@@ -254,17 +254,53 @@ class Projects:
 
     def file_selection(self, p, chosen):
         options = [(f['id'], f['label']) for f in p.get('files', [])] + [('knowledge', 'Knowledge notes / todos / plans')]
-        chosen = chosen or options[0][0]
+        if not chosen:
+            return options, '', ''
         label = next((label for fid, label in options if fid == chosen), None)
         if label is None:
             raise web.HTTPNotFound()
         return options, chosen, label
 
     def install(self, app):
+        app.router.add_get('/tower/projects-select.js', self.selection_script, allow_head=False)
         app.router.add_get('/tower/projects', self.redirect, allow_head=False)
         app.router.add_get('/tower/projects/', self.page, allow_head=False)
         app.router.add_get('/tower/projects/{project}', self.page, allow_head=False)
         app.router.add_get('/tower/projects/{project}/images/{image}', self.image, allow_head=False)
+
+    async def selection_script(self, request):
+        return web.Response(text="document.querySelectorAll('select[data-file-selection]').forEach(select => select.addEventListener('change', () => { if (select.value) select.form.requestSubmit(); }));",
+                            content_type='application/javascript', headers=HEADERS)
+
+    def last_activity(self, p, data):
+        times = [e['at'] for e in self.activity(p, data)]
+        if data.get('file_update'):
+            times.append(data['file_update']['at'])
+        answer = data.get('acceptance', {}).get('answer')
+        if answer:
+            times.append(answer['answered_at'])
+        return max(times, key=stamp, default=None)
+
+    def overview(self, rows, query, now=None):
+        """Pure bounded partition; runtime unknown is never interpreted as busy."""
+        now = now or datetime.now(timezone.utc)
+        tab = query.get('tab', 'flight')
+        search = query.get('q', '')
+        page = query.get('page', '1')
+        if tab not in ('flight', 'else') or len(search) > 200 or any(ord(c) < 32 for c in search) or not re.fullmatch(r'[1-9][0-9]{0,3}', page):
+            raise web.HTTPBadRequest(text='Invalid overview selection')
+        selected = []
+        for p, data, unavailable in rows:
+            last = self.last_activity(p, data)
+            runtime = data.get('runtime', {})
+            running = runtime.get('state') == 'running'
+            flight = running or bool(last and now - timedelta(hours=48) <= stamp(last) <= now)
+            if flight == (tab == 'flight') and (tab != 'else' or search.casefold() in p['title'].casefold()):
+                selected.append((p, data, unavailable))
+        selected.sort(key=lambda row: (stamp(self.last_activity(row[0], row[1])) or datetime.min.replace(tzinfo=timezone.utc), row[0]['title'].casefold()), reverse=True)
+        pages = max(1, (len(selected) + 29) // 30)
+        number = min(int(page), pages)
+        return selected[(number-1)*30:number*30], tab, search, number, pages
 
     async def redirect(self, request):
         raise web.HTTPFound('/tower/projects/')
@@ -306,11 +342,26 @@ class Projects:
                 _, _, label = self.file_selection(selected, request.query.get('file'))
                 title = selected['title']
             body, feed, updated = (f'<p>{esc(error)}</p>' if error else ''), [], []
-            for p in ([selected] if selected else projects):
+            invalid = sum(bool(p.get('_invalid')) for p in projects)
+            if invalid:
+                body += f'<p>Project information unavailable: malformed configuration ({invalid} entries). The project owner must configure its shared snapshot.</p>'
+            rows = [(p, *self.projection(p)) for p in ([selected] if selected else projects) if not p.get('_invalid')]
+            for p, data, _ in rows:
+                feed.extend(dict(e, project_title=p['title']) for e in self.activity(p, data))
+            if not selected:
+                rows, tab, search, number, pages = self.overview(rows, request.query)
+                body += '<nav><a href="?tab=flight">In flight</a><a href="?tab=else">Everything else</a></nav>'
+                if tab == 'else':
+                    body += '<form method="get"><input type="hidden" name="tab" value="else"><label>Project name <input name="q" maxlength="200" value="' + esc(search) + '"></label><button>Search</button></form>'
+                body += f'<p>{"In flight" if tab == "flight" else "Everything else"} · Page {number} of {pages}</p><nav>'
+                for n, label in ((number-1, 'Previous'), (number+1, 'Next')):
+                    if 1 <= n <= pages:
+                        body += '<a href="?' + esc(urlencode(dict(tab=tab, q=search, page=n))) + '">' + label + '</a>'
+                body += '</nav>'
+            for p, data, unavailable in rows:
                 if p.get('_invalid'):
                     body += '<section class="project-row">Project information unavailable: malformed configuration. The project owner must configure its shared snapshot.</section>'
                     continue
-                data, unavailable = self.projection(p)
                 fields = self.summary(p, data)
                 observed = data.get('summary', {}).get('observed_at')
                 if observed:
@@ -323,8 +374,9 @@ class Projects:
                 body += '<span class="project-status">' + esc(compact(fields.get('status'), 70)) + '</span>'
                 if fields['needs_you']:
                     body += '<b class="needs-you">Needs you</b>'
-                if fields.get('last landed'):
-                    body += '<small>' + relative_time(fields['last landed'], 'Landed ') + '</small>'
+                last = self.last_activity(p, data)
+                if last:
+                    body += '<small>' + relative_time(last, 'Activity ') + '</small>'
                 body += '</div>' if selected else '</a>'
                 if selected:
                     body += '<dl>'
@@ -339,6 +391,7 @@ class Projects:
                         body += '<p role="status">Source changed. The owner must shorten its plain progress header.</p>'
                     body += '<details><summary>Project details</summary>'
                     body += '<p>' + esc(fields['_source']) + ' · outcome ' + esc(p['outcome_id']) + '</p>'
+                    body += '<p>Lead runtime: ' + esc(data.get('runtime', {}).get('state', 'unknown')) + '</p>'
                     for key in ('usable now', 'left', 'waiting on', 'handed to'):
                         if fields.get(key):
                             body += '<p><b>' + esc(key.capitalize()) + ':</b> ' + esc(fields[key]) + '</p>'
@@ -348,7 +401,6 @@ class Projects:
                 body += '</section>'
                 if unavailable and not selected:
                     body += '<small>' + esc(p['title']) + ': ' + esc(unavailable) + '</small>'
-                feed.extend(dict(e, project_title=p['title']) for e in self.activity(p, data))
                 if selected:
                     body += f'<p role="status">{esc(unavailable)}</p>' if unavailable else ''
                     body += self.files(p, data, request.query.get('file'))
@@ -362,7 +414,7 @@ class Projects:
                 body += '<h2>Recent activity · last 6 hours</h2>'
             seen = set()
             more_activity = False
-            for e in recent:
+            for e in recent[:50]:
                 event_key = (e['project_id'], e['id'])
                 if event_key in seen:
                     continue
@@ -370,7 +422,7 @@ class Projects:
                 if len(seen) == 4:
                     body += '<details><summary>More activity</summary>'
                     more_activity = True
-                body += '<section class="activity"><b>' + esc(e['project_title']) + '</b> · ' + esc({'landing': 'Landed', 'acceptance': 'Acceptance', 'decision': 'Decision', 'handoff': 'Handoff'}[e['kind']]) + ' · ' + relative_time(e['at']) + '<p>' + esc(compact(e.get('label'))) + '</p><details><summary>Event details</summary><p>' + esc(e.get('label')) + '</p><small>' + esc(e['reference']) + ' · ' + esc(e['provenance']) + '</small></details></section>'
+                body += '<section class="activity"><b>' + esc(e['project_title']) + '</b> · ' + esc({'landing': 'Landed', 'acceptance': 'Acceptance', 'decision': 'Decision', 'handoff': 'Handoff', 'status': 'Status observed'}[e['kind']]) + ' · ' + relative_time(e['at']) + '<p>' + esc(compact(e.get('label'))) + '</p><details><summary>Event details</summary><p>' + esc(e.get('label')) + '</p><small>' + esc(e['reference']) + ' · ' + esc(e['provenance']) + '</small></details></section>'
             if more_activity:
                 body += '</details>'
             css = Path(__file__).with_name('viewer.html').read_text().split('<style>')[1].split('</style>')[0]
@@ -378,10 +430,13 @@ class Projects:
             css += '.project-row{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline}.project-name{font-weight:650}.summary-cell{font-size:12px;overflow-wrap:anywhere;min-width:0}.project-row dl,.project-row small{width:100%}.table-scroll{overflow-x:auto}table{border-collapse:collapse}td,th{padding:4px 8px;border:1px solid var(--line)}article p{margin:6px 0}'
             css += 'header,main,section,form,dl,dd{min-width:0} h1,a,label,article{overflow-wrap:anywhere} nav{display:flex;flex-wrap:wrap;gap:8px} nav a,.project-name{display:inline-flex;align-items:center;min-height:44px;min-width:44px;padding:8px;max-width:100%} a:focus-visible,select:focus-visible,button:focus-visible,summary:focus-visible{outline:3px solid var(--accent);outline-offset:2px} form{display:flex;flex-wrap:wrap;align-items:end;gap:8px;margin:12px 0} form label{display:grid;gap:4px;min-width:0;max-width:100%;flex:1 1 12rem} select,button{min-height:44px;min-width:44px} select{width:100%;background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px} details>summary{display:list-item;min-height:44px;padding:12px;overflow-wrap:anywhere} .project-row{align-items:center}'
             css += '.project-row{display:block;padding:0}.project-link{display:grid;grid-template-columns:1fr auto;gap:3px 8px;padding:12px;min-height:44px;text-decoration:none;box-sizing:border-box}.project-link strong{grid-column:1/-1;text-decoration:underline}.project-status{color:var(--fg);font-size:13px}.project-link small{width:auto;color:var(--muted);font-size:12px}.needs-you{font-size:12px;color:var(--accent)}.project-heading{display:flex;flex-wrap:wrap;gap:6px 12px}.project-row:has(dl){padding:12px}.project-row dl{margin:8px 0;font-size:13px}.project-row time{font-size:12px;color:var(--muted)}.activity{font-size:13px}.activity p{margin:4px 0}h2{font-size:18px}details{width:100%}'
-            document = '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + esc(title) + '</title><style>' + css + '</style><header><h1>' + esc(title) + '</h1><nav aria-label="Tower"><a href="/tower/">Events</a><a href="/tower/projects/">All projects</a></nav></header><main>' + body + '</main></html>'
+            css += '.project-link{display:flex;flex-wrap:nowrap;align-items:center}.project-link strong{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.project-link .project-status{max-width:35%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.project-link small{white-space:nowrap}'
+            document = '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + esc(title) + '</title><script src="/tower/projects-select.js" defer></script><style>' + css + '</style><header><h1>' + esc(title) + '</h1><nav aria-label="Tower"><a href="/tower/">Events</a><a href="/tower/projects/">All projects</a></nav></header><main>' + body + '</main></html>'
             if len(document.encode()) > 2 * 1024 * 1024:
                 raise ValueError('response too large')
-            return web.Response(text=document, content_type='text/html', headers=HEADERS)
+            headers = dict(HEADERS)
+            headers['Content-Security-Policy'] += "; script-src 'self'"
+            return web.Response(text=document, content_type='text/html', headers=headers)
         except (KeyError, ValueError, OSError, TypeError, UnicodeError, RecursionError):
             return web.Response(text='Project information unavailable: configuration missing, unreadable or invalid. The project owner must refresh or configure its shared snapshot.', status=503, headers=HEADERS)
 
@@ -390,11 +445,13 @@ class Projects:
         knowledge = data.get('knowledge', {})
         entries = knowledge.get('items', [])[:200] if knowledge.get('state') == 'available' else []
         options, chosen, label = self.file_selection(p, chosen)
-        body = '<form method="get"><label>File <select name="file">'
-        for fid, label in options:
-            body += f'<option value="{esc(fid)}"' + (' selected' if fid == chosen else '') + '>' + esc(label) + '</option>'
-        selected_label = next(text for fid, text in options if fid == chosen)
-        body += '</select></label> <button>Open</button></form><details><summary>Read ' + esc(selected_label) + '</summary><article>'
+        body = '<form method="get"><label>File <select name="file" data-file-selection><option value="">Choose a file</option>'
+        for fid, option_label in options:
+            body += f'<option value="{esc(fid)}"' + (' selected' if fid == chosen else '') + '>' + esc(option_label) + '</option>'
+        body += '</select></label><noscript><button>Read file</button></noscript></form>'
+        if not chosen:
+            return body
+        body += '<article><h2>' + esc(label) + '</h2>'
         if chosen == 'knowledge':
             body += '<h2>Knowledge</h2><p>' + esc(knowledge.get('state', 'unavailable')) + ' · ' + esc(knowledge.get('provenance')) + '</p>'
             body += relative_time(knowledge.get('observed_at'), 'Notes and todos from ')
@@ -418,4 +475,4 @@ class Projects:
                 body += markdown(read_file(root, f['path'], {'.md'}).decode(), images)
             except (ValueError, OSError, UnicodeError):
                 body += '<p>Selected file unavailable: missing, unreadable or not permitted. The project owner must restore or configure the shared document.</p>'
-        return body + '</article></details>'
+        return body + '</article>'

@@ -123,9 +123,23 @@ def bound(data, p):
 def projection(data, p):
     json_depth(data)
     version(data)
-    keys(data, 'version project_id outcome_id generated_at summary knowledge acceptance activity')
+    keys(data, 'version project_id outcome_id generated_at summary knowledge acceptance activity status_observation runtime file_update')
     bound(data, p)
     generated = time(data.get('generated_at'))
+    for name in ('status_observation', 'runtime', 'file_update'):
+        if name not in data:
+            continue
+        s = data[name]
+        keys(s, 'at reference provenance' + (' text id' if name == 'status_observation' else ' state' if name == 'runtime' else ''))
+        evidence(s)
+        if time(s.get('at')) > generated:
+            raise ValueError('observation after generation')
+        if name == 'status_observation':
+            ident(s.get('id')); text(s.get('text'), 80)
+            if s['text'] != s['text'].strip() or any(ord(c) < 32 for c in s['text']):
+                raise ValueError('invalid status')
+        if name == 'runtime' and s.get('state') not in ('running', 'idle', 'unknown'):
+            raise ValueError('invalid runtime state')
     if 'summary' in data:
         s = obj(data['summary'])
         if set(s) - {'observed_at', 'provenance', 'reference', 'usable now', 'left', 'waiting on', 'handed to', 'needs_you'}:
@@ -205,10 +219,14 @@ def projection(data, p):
         bound(e, p)
         evidence(e)
         eid = ident(e.get('id'))
-        if eid in ids or e.get('kind') not in ('landing', 'acceptance', 'decision', 'handoff'):
+        if eid in ids or e.get('kind') not in ('landing', 'acceptance', 'decision', 'handoff', 'status'):
             raise ValueError('invalid/duplicate activity')
         ids.add(eid)
         text(e.get('label'), 500)
+        if e['kind'] == 'status':
+            text(e['label'], 80)
+            if e['label'] != e['label'].strip() or any(ord(c) < 32 for c in e['label']):
+                raise ValueError('invalid status observation')
         if time(e.get('at')) > generated:
             raise ValueError('activity after export')
     return data

@@ -56,7 +56,7 @@ async def test_bad_export_isolated(tmp_path, field, value):
     app = web.Application()
     Projects(str(manifest)).install(app)
     async with TestClient(TestServer(app)) as client:
-        response = await client.get('/tower/projects/')
+        response = await client.get('/tower/projects/?tab=else')
         body = await response.text()
         assert response.status == 200 and 'Project One' in body and 'Project Two' in body
         assert 'snapshot unavailable: missing, unreadable or invalid' in body and '<b>acceptance:</b> Accepted' not in body
@@ -102,7 +102,7 @@ async def test_invalid_utf8_export_isolated(tmp_path):
     app = web.Application()
     Projects(str(manifest)).install(app)
     async with TestClient(TestServer(app)) as client:
-        response = await client.get('/tower/projects/')
+        response = await client.get('/tower/projects/?tab=else')
         body = await response.text()
         assert response.status == 200
         assert 'Project One' in body and 'snapshot unavailable: missing, unreadable or invalid' in body
@@ -126,9 +126,9 @@ async def test_deep_json_and_bad_manifest_entry(tmp_path):
     app = web.Application()
     Projects(str(manifest)).install(app)
     async with TestClient(TestServer(app)) as client:
-        response = await client.get('/tower/projects/')
+        response = await client.get('/tower/projects/?tab=else')
         body = await response.text()
-        assert response.status == 200 and body.count('Project information unavailable: malformed configuration') == 2
+        assert response.status == 200 and 'malformed configuration (2 entries)' in body
         assert 'Project One' in body and 'snapshot unavailable: missing, unreadable or invalid' in body
 
 
@@ -138,7 +138,7 @@ async def test_image_routes_summary_and_activity(tmp_path):
     app = web.Application()
     pages.install(app)
     async with TestClient(TestServer(app)) as client:
-        response = await client.get('/tower/projects/p1')
+        response = await client.get('/tower/projects/p1?file=lead')
         body = await response.text()
         assert response.status == 200
         assert 'Fresh header' in body and 'Remaining work' in body and 'observed ' in body
@@ -184,6 +184,9 @@ async def test_all_rows_not_first_n(tmp_path):
     app = web.Application()
     Projects(str(manifest)).install(app)
     async with TestClient(TestServer(app)) as client:
-        body = await (await client.get('/tower/projects/')).text()
-        assert body.count('class="project-row"') == 100
-        assert 'Visible project 99' in body and 'Visible project 0' in body
+        body = await (await client.get('/tower/projects/?tab=else')).text()
+        assert body.count('class="project-row"') == 30
+        assert 'Next' in body
+        body = await (await client.get('/tower/projects/?tab=else&q=Visible+project+99')).text()
+        assert body.count('class="project-row"') == 1
+        assert 'Visible project 99' in body

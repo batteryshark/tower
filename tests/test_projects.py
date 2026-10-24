@@ -18,7 +18,9 @@ def fixture(tmp_path):
          'export': {'root': str(tmp_path), 'path': 'projection.json'}}
     data = {'version': 1, 'project_id': 'p_demo', 'outcome_id': 'o2',
             'generated_at': datetime.now(timezone.utc).isoformat(),
+            'file_update': {'at': datetime.now(timezone.utc).isoformat(), 'reference': 'LEAD.md', 'provenance': 'Source file timestamp'},
             'knowledge': {'state': 'available', 'provenance': 'supported API', 'items': [{'id': 'todo-1', 'kind': 'todo', 'title': 'Task', 'body': 'Details', 'completed': False}]}}
+    data['generated_at'] = datetime.now(timezone.utc).isoformat()
     (tmp_path / 'projection.json').write_text(json.dumps(data))
     manifest = tmp_path / 'manifest.json'
     manifest.write_text(json.dumps({'version': 1, 'projects': [p]}))
@@ -71,7 +73,7 @@ async def test_routes_phone_readonly(fixture):
             body = await response.text()
             assert response.status == 200
             assert 'width=device-width' in body and 'max-width:420px' in body
-            assert 'script-src' not in response.headers['Content-Security-Policy']
+            assert "script-src 'self'" in response.headers['Content-Security-Policy']
             for method in ('POST', 'PUT', 'DELETE', 'PATCH', 'HEAD'):
                 assert (await client.request(method, route)).status == 405
         body = await (await client.get('/tower/projects/p_demo?file=knowledge')).text()
@@ -99,12 +101,13 @@ async def test_snapshot_controls_and_selection_source(fixture):
         assert 'Unreported' not in overview
         assert '<a class="project-link" href="/tower/projects/p_demo"><strong>Demo</strong>' in overview
         assert 'Usable now' not in overview and 'No reported semantic activity' not in overview
-        for query, label in [('', 'LEAD.md'), ('?file=knowledge', 'Knowledge notes / todos / plans')]:
+        for query, label in [('?file=lead', 'LEAD.md'), ('?file=knowledge', 'Knowledge notes / todos / plans')]:
             body = await (await client.get('/tower/projects/p_demo' + query)).text()
             assert '<title>Demo</title>' in body
             assert '<h1>Demo</h1>' in body
-            assert f'<details><summary>Read {label}</summary><article>' in body
-            assert 'method="get"' in body and '<button>Open</button>' in body
+            assert f'<article><h2>{label}</h2>' in body
+            assert 'method="get"' in body and '<noscript><button>Read file</button></noscript>' in body
+            assert '<summary>Read ' not in body and 'data-file-selection' in body
             assert 'min-height:44px' in body and 'min-width:44px' in body
             assert 'a:focus-visible,select:focus-visible,button:focus-visible,summary:focus-visible' in body
             assert 'outline:3px solid var(--accent)' in body
@@ -113,13 +116,13 @@ async def test_snapshot_controls_and_selection_source(fixture):
             assert 'No answer reported' not in body
         p_root = Path(p['root'])
         p_root.joinpath('projection.json').unlink()
-        body = await (await client.get('/tower/projects/')).text()
+        body = await (await client.get('/tower/projects/?tab=else')).text()
         assert 'Unreported' not in body
         assert 'missing, unreadable or invalid' in body and 'project owner must refresh or configure' in body
         body = await (await client.get('/tower/projects/p_demo?file=knowledge')).text()
         assert 'Knowledge unavailable:' in body
         p_root.joinpath('LEAD.md').unlink()
-        body = await (await client.get('/tower/projects/p_demo')).text()
+        body = await (await client.get('/tower/projects/p_demo?file=lead')).text()
         assert 'project owner must restore or configure the shared document' in body
 
 
