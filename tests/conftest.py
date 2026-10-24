@@ -16,6 +16,14 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+@pytest.fixture(autouse=True)
+def isolated_bus_auth(tmp_path, monkeypatch):
+    """Never read the real ~/.tower/nats/client.json or a TOWER_NATS_USER from the developer's shell."""
+    monkeypatch.setenv("TOWER_NATS_CLIENT_CONFIG", str(tmp_path / "no-client.json"))
+    for name in ("TOWER_NATS_USER", "TOWER_NATS_PASSWORD_FILE"):
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture
 def temp_bus(tmp_path):
     """Start a private nats-server; yields (url, token_file). Skips if nats-server is not installed."""

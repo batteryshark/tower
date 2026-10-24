@@ -5,6 +5,11 @@ Environment:
     TOWER_NATS_TOKEN_FILE  default ~/.tower/secrets/nats.token (0600; read, never logged)
     TOWER_NATS_USER        optional: connect as this NATS user instead of with the token
     TOWER_NATS_PASSWORD_FILE  the user's password file (0600; read, never logged); required with TOWER_NATS_USER
+    TOWER_NATS_CLIENT_CONFIG  the client pointer, default ~/.tower/nats/client.json (0600, no secrets):
+                           {"mode": "token"} or {"mode": "user", "user": "tower", "password_file": "..."}
+
+Auth precedence: explicit connect() arguments (user/password_file, or a token_file) > TOWER_NATS_USER +
+TOWER_NATS_PASSWORD_FILE > client.json > the token (the default; a missing client.json means the token).
 
 Streams:
     TOWER      ev.>   file storage, limits retention, 30 days, 5 GiB cap, 10 minute duplicate window
@@ -16,6 +21,7 @@ ev.github.pr.opened.batteryshark.tower. Dead letters go to dlq.<handler>.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -32,6 +38,7 @@ from . import events
 
 DEFAULT_URL = "nats://127.0.0.1:4222"
 DEFAULT_TOKEN_FILE = "~/.tower/secrets/nats.token"
+DEFAULT_CLIENT_CONFIG = "~/.tower/nats/client.json"
 
 STREAM = "TOWER"
 DLQ_STREAM = "TOWER_DLQ"
@@ -101,6 +108,42 @@ async def _log_error(exc: Exception) -> None:
     print(f"tower: {exc}", file=sys.stderr)
 
 
+def _read_password(path: str) -> str:
+    try:
+        password = Path(os.path.expanduser(path)).read_text().strip()
+    except OSError as exc:
+        raise ValueError(f"NATS password file unreadable ({exc.__class__.__name__})") from None
+    if not password:
+        raise ValueError("NATS password file is empty")
+    return password
+
+
+def read_client_config(path: str | None = None) -> dict[str, Any] | None:
+    """The client pointer (TOWER_NATS_CLIENT_CONFIG or ~/.tower/nats/client.json), or None if absent.
+
+    Raises ValueError with a static reason when it exists but is not usable.
+    """
+    pointer = Path(os.path.expanduser(path or os.environ.get("TOWER_NATS_CLIENT_CONFIG") or DEFAULT_CLIENT_CONFIG))
+    try:
+        raw = pointer.read_text()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ValueError(f"NATS client config unreadable ({exc.__class__.__name__})") from None
+    try:
+        config = json.loads(raw)
+    except json.JSONDecodeError:
+        raise ValueError("NATS client config is not JSON") from None
+    if not isinstance(config, dict) or config.get("mode") not in ("token", "user"):
+        raise ValueError('NATS client config needs "mode": "token" or "user"')
+    if config["mode"] == "user":
+        if not isinstance(config.get("user"), str) or not config["user"]:
+            raise ValueError('NATS client config mode "user" needs "user"')
+        if not isinstance(config.get("password_file"), str) or not config["password_file"]:
+            raise ValueError('NATS client config mode "user" needs "password_file"')
+    return config
+
+
 def read_user_password(user: str | None = None, password_file: str | None = None) -> tuple[str, str] | None:
     """(user, password) when TOWER_NATS_USER (or user) is set, else None. Raises ValueError if the password is missing."""
     user = user or os.environ.get("TOWER_NATS_USER")
@@ -109,13 +152,32 @@ def read_user_password(user: str | None = None, password_file: str | None = None
     path = password_file or os.environ.get("TOWER_NATS_PASSWORD_FILE")
     if not path:
         raise ValueError("TOWER_NATS_USER is set but TOWER_NATS_PASSWORD_FILE is not")
-    try:
-        password = Path(os.path.expanduser(path)).read_text().strip()
-    except OSError as exc:
-        raise ValueError(f"NATS password file unreadable ({exc.__class__.__name__})") from None
-    if not password:
-        raise ValueError("NATS password file is empty")
-    return user, password
+    return user, _read_password(path)
+
+
+def auth_options(token_file: str | None = None, *, user: str | None = None, password_file: str | None = None,
+                 client_config: str | None = None) -> dict[str, str]:
+    """The nats.connect auth options, by the precedence above. Values are secrets: never log the result."""
+    credentials = read_user_password(user, password_file)
+    if credentials is None and token_file is None:
+        config = read_client_config(client_config)
+        if config is not None and config["mode"] == "user":
+            credentials = config["user"], _read_password(config["password_file"])
+    if credentials:
+        return {"user": credentials[0], "password": credentials[1]}
+    token = read_token(token_file)
+    return {"token": token} if token else {}
+
+
+def auth_mode(token_file: str | None = None) -> str:
+    """'user <name>' or 'token' (no secrets), for status lines."""
+    user = os.environ.get("TOWER_NATS_USER")
+    if user:
+        return f"user {user} (env)"
+    config = None if token_file is not None else read_client_config()
+    if config is not None and config["mode"] == "user":
+        return f"user {config['user']} (client.json)"
+    return "token"
 
 
 async def connect(
@@ -124,20 +186,15 @@ async def connect(
     *,
     user: str | None = None,
     password_file: str | None = None,
+    client_config: str | None = None,
     **options: Any,
 ) -> Client:
-    """Connect to the bus. Default: the token from the token file. With TOWER_NATS_USER (or user=) set, connect as
-    that user with the password from TOWER_NATS_PASSWORD_FILE instead; the token is then not sent (NATS refuses a
-    token on a server configured with users). Extra options go to nats.connect."""
+    """Connect to the bus, choosing auth by the precedence in this module's docstring. With a user the token is not
+    sent (NATS refuses a token on a server configured with users). Extra options go to nats.connect."""
     servers = url or os.environ.get("TOWER_NATS_URL") or DEFAULT_URL
-    credentials = read_user_password(user, password_file)
-    if credentials:
-        options.setdefault("user", credentials[0])
-        options.setdefault("password", credentials[1])
-    else:
-        token = read_token(token_file)
-        if token:
-            options.setdefault("token", token)
+    auth = auth_options(token_file, user=user, password_file=password_file, client_config=client_config)
+    for key, value in auth.items():
+        options.setdefault(key, value)
     options.setdefault("name", "tower")
     options.setdefault("error_cb", _log_error)
     options.setdefault("connect_timeout", 5)

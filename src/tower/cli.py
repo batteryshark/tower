@@ -288,6 +288,34 @@ async def cmd_nod(args: argparse.Namespace) -> int:
                     for row in outcomes) else 0
 
 
+async def cmd_auth(args: argparse.Namespace) -> int:
+    print(f"bus auth: {bus.auth_mode()}")
+    return 0
+
+
+async def cmd_nats_users(args: argparse.Namespace) -> int:
+    from . import nats_users as nu
+
+    paths = nu.Paths.from_env(args.home)
+    if args.action == "verify":
+        expect = tuple(u for u in args.expect.split(",") if u)
+        failed = False
+        for check, ok, detail in await nu.verify(paths, expect, monitor=args.monitor):
+            print(f"{'ok  ' if ok else 'FAIL'} {check}: {detail}")
+            failed = failed or not ok
+        if failed:
+            print("A check failed: run the rollback once, in the recorded order, then HOLD (no repeat).")
+        return 1 if failed else 0
+    if args.action == "plan":
+        lines = nu.plan(paths)
+    elif args.action == "apply":
+        lines = nu.apply(paths, execute=args.execute)
+    else:
+        lines = nu.rollback(paths, execute=args.execute)
+    print("\n".join(lines))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tower", description="Tower event bus (NATS JetStream).")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -336,6 +364,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--count", type=int, default=0)
     p.add_argument("--follow", action="store_true", help="keep following after the backlog")
     p.set_defaults(func=cmd_dlq)
+
+    p = sub.add_parser("auth", help="show which bus auth this client would use (no secrets, no connection)")
+    p.set_defaults(func=cmd_auth)
+
+    p = sub.add_parser("admin", help="operator tools")
+    admin = p.add_subparsers(dest="admin_command", required=True)
+    q = admin.add_parser("nats-users", help="per-producer NATS users: plan, apply, rollback, verify")
+    q.add_argument("action", choices=["plan", "apply", "rollback", "verify"])
+    q.add_argument("--execute", action="store_true", help="apply/rollback for real (default: dry run)")
+    q.add_argument("--home", help="Tower home (default TOWER_HOME or ~/.tower)")
+    q.add_argument("--expect", default="tower,docket", help="verify: the active users expected (default tower,docket)")
+    q.add_argument("--monitor", default="http://127.0.0.1:8222", help="verify: nats monitoring URL")
+    q.set_defaults(func=cmd_nats_users)
 
     p = sub.add_parser("nod", help="Nod uplift helpers (report only)")
     nod_sub = p.add_subparsers(dest="nod_command", required=True)
