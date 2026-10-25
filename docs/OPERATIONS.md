@@ -17,8 +17,8 @@
 | Host health | `http://127.0.0.1:8796/health` (loopback only) |
 | Live viewer | `http://127.0.0.1:8796/tower/`; tailnet `https://<your-mac>.<tailnet>.ts.net:9443/tower/` via `tailscale serve --set-path=/tower` ([VIEWER.md](VIEWER.md)) |
 | Host log | `~/Library/Logs/tower-host.log` (JSON lines) |
-| Host state | `~/.tower/state/` (waker ledger, nod-watcher ledger, github state, handler ledger `ledger.sqlite`; `TOWER_STATE_DIR` moves it); reviews in `~/.tower/reviews/` |
-| Host env | `TOWER_NOD_URL=<Nod base URL>`, `TOWER_NOD_TOKEN_FILE=<path to a Nod issuer token>` (read by path; the Nod watcher is disabled without both), `PYTHONUNBUFFERED=1` |
+| Host state | `~/.tower/state/` (waker ledger, the retired nod-watcher's ledger kept for audit, github state, handler ledger `ledger.sqlite`; `TOWER_STATE_DIR` moves it); reviews in `~/.tower/reviews/` |
+| Host env | `TOWER_NOD_URL=<Nod base URL>`, `TOWER_NOD_TOKEN_FILE=<path to a Nod issuer token>` (read by path; `nod-answer-recorded` and `nod-catchup` need both), `PYTHONUNBUFFERED=1` |
 
 ## Install (what was done)
 
@@ -76,6 +76,19 @@ Rollback: never `git reset --hard` the main checkout without the lead. Instead, 
 `git pull --ff-only` and `fleet restart tower-host`. The durable consumer `nod-answer-recorded` stays on the stream
 after a revert; remove it with `nats consumer rm TOWER nod-answer-recorded` (or leave it: nothing reads it).
 `~/.tower/state/ledger.sqlite` can stay; nothing else uses it.
+
+## S7: Nod watcher retired (2026-10-25)
+
+`nod-watcher` (polled Nod for requests announced on `ev.nod.request.asked`) and `nod-answer-wake` (woke on
+`ev.nod.answer.received`) are deleted; `nod-answer-recorded` on Nod's `ev.nod.answer.recorded` is the only Nod path.
+Their durable consumers are removed by the operator (`nats consumer rm TOWER nod-watcher`,
+`nats consumer rm TOWER nod-answer-wake`). `~/.tower/state/nod-watcher/requests.json` stays for audit;
+`tower nod pending` still reads it.
+
+Rollback: the old path needs the Nod issuer OFF first, so the old path and the new one never both wake. Then
+revert the S7 commit in a worktree from origin/main (`git revert --no-edit <S7 sha>`), push to main, fast-forward the
+main checkout (`git pull --ff-only`) and `fleet restart tower-host`. The old handlers recreate their consumers (they
+start at new events only).
 
 ## Per-producer users (runbook for the window)
 

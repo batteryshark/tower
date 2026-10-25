@@ -6,7 +6,7 @@ An event is a plain dict:
       "specversion": "1.0",
       "id": "<uuid7>",
       "source": "tower/cli",
-      "type": "nod.answer.received",
+      "type": "docket.timer.fired",
       "time": "2026-10-23T12:00:00.000Z",
       "subject": "optional",
       "datacontenttype": "application/json",

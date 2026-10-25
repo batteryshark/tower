@@ -85,10 +85,8 @@ finished. To consume events too, `async for event, msg in ctx.subscribe("ev.x.>"
 
 | File | Kind | Does |
 |---|---|---|
-| `nod_answer_wake.py` (`nod-answer-wake`) | handler on `ev.nod.answer.received` | wakes `data.origin.session` in `data.origin.directory` with the request id and answer summary in a DATA block |
 | `nod_catchup.py` (`nod-catchup`) | watcher | PROVISIONAL (Nod uplift). Off unless `TOWER_NOD_CATCHUP=on` (logs `disabled`, makes no Nod call). When on: pages Nod's journal from a durable cursor on start, on bus reconnect and every `catchup_interval` (600 s), and runs every answer not yet terminal through the same path as `nod-answer-recorded`. See "Nod: recovery" below. |
-| `nod_answer_recorded.py` (`nod-answer-recorded`) | handler on `ev.nod.answer.recorded` and `ev.nod.answer.received` | PROVISIONAL (Nod uplift). Shares `tower.nod.process` with `nod-catchup`. Reads the origin from Nod's detail route (2 s timeout; 404 or no origin drops; 5xx/timeout retries, dead letter after 5; a detail that does not match the event dead-letters), then wakes `origin.session` in `origin.directory` with ids and statuses only, never the answer. `TOWER_NOD_MODE` (env, else config `mode`): `shadow` (default) logs the wake without calling the waker, `live` wakes. Ledger namespaces `live`/`shadow` in `~/.tower/state/ledger.sqlite`; in shadow it also logs a `shadow pairing` record against the watcher's `ev.nod.answer.received` for the same request id. |
-| `nod_watcher.py` (`nod-watcher`) | watcher | consumes `ev.nod.request.asked` (`request_id`, `origin {session, directory}`, optional `reference`), keeps open requests in `~/.tower/state/nod-watcher/requests.json`, polls Nod `GET /api/v1/requests/{id}/decision` every 15 s, publishes `ev.nod.answer.received` once per answered request (id from request id + answer digest). Stops watching on cancel/expiry or after 14 days. Env `TOWER_NOD_URL`, `TOWER_NOD_TOKEN_FILE`; without both it logs `disabled` and idles. Read-only, only for announced ids; never logs answers. |
+| `nod_answer_recorded.py` (`nod-answer-recorded`) | handler on `ev.nod.answer.recorded` | Nod answers (replaces the retired `nod-watcher` and `nod-answer-wake`, S7 2026-10-25). Shares `tower.nod.process` with `nod-catchup`. Reads the origin from Nod's detail route (2 s timeout; 404 or no origin drops; 5xx/timeout retries, dead letter after 5; a detail that does not match the event dead-letters), then wakes `origin.session` in `origin.directory` with ids and statuses only, never the answer. `TOWER_NOD_MODE` (env, else config `mode`): `shadow` (default) logs the wake without calling the waker, `live` wakes. Ledger namespaces `live`/`shadow` in `~/.tower/state/ledger.sqlite`. |
 | `stall_ping_chief.py` (`stall-ping-chief`) | handler on `ev.lead.delivery.stalled` | reads an operator pointer file (JSON `session`, `directory`; default `~/.chief-of-staff/chief.json`, config `pointer`) fresh and messages the chief session with the stall as DATA |
 | `github_pr_review.py` (`github-pr-review`) | handler on `ev.github.pr.opened.>` | creates `~/.tower/reviews/<owner>-<repo>-pr<N>/` and starts a session there (agent `build`, model `claude-code/claude-sonnet-5-5[1m]`, title `review <owner>/<repo>#<N>`) that reads the PR with `gh pr view/diff` and writes `review.md`. It is told to post nothing to GitHub. |
 | `github_watcher.py` (`github`) | watcher | runs `tower.publishers.github.poll_once` every `interval` s (default 120) on `repos` (default `["MeChen618/AstaPS"]`); see [GITHUB.md](GITHUB.md) |
@@ -104,8 +102,6 @@ interval = 120
 agent = "build"
 model = "claude-code/claude-sonnet-5-5[1m]"
 
-[nod-watcher]
-poll_interval = 15
 ```
 
 ### The ledger
@@ -121,7 +117,7 @@ admission = await ctx.waker.message_session(...)
 ctx.ledger.mark(event["source"], event["id"], namespace="live", ref=request_id, outcome="woke")
 ```
 
-`tower nod pending` prints the old watcher's open request ids.
+`tower nod pending` prints the open request ids in the retired watcher's ledger file, if it is still there (audit only).
 
 ### nod-answer-recorded at cutover
 

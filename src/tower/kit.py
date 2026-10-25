@@ -2,8 +2,8 @@
 
 A HANDLER is one file with a subscription and a handle function:
 
-    NAME = "nod-answer-wake"
-    SUBSCRIBE = "ev.nod.answer.received"        # or a list of filters
+    NAME = "docket-fire-note"
+    SUBSCRIBE = "ev.docket.timer.fired"         # or a list of filters
     MAX_DELIVER = 5                              # optional
     BACKOFF = [5, 30, 120, 600]                  # optional, seconds between attempts
 
@@ -18,12 +18,12 @@ durable state of your own); its errors are logged, never retried.
 
 A WATCHER is one file with a long-running loop that watches the outside world and publishes events:
 
-    NAME = "nod-watcher"
+    NAME = "github"
 
     async def run(ctx):
         while True:
             ...
-            await ctx.publish("nod.answer.received", data, id=stable_id)
+            await ctx.publish("github.pr.opened", data, qualifiers, id=stable_id)
             await asyncio.sleep(30)
 
 The host restarts a watcher that crashes, with backoff. `ctx.reconnected` is an asyncio.Event the host sets when the

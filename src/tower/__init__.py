@@ -4,7 +4,7 @@
 
     nc = await bus.connect()
     js = nc.jetstream()
-    await bus.publish(js, events.build("nod.answer.received", {"request_id": "r1"}, source="nod"))
+    await bus.publish(js, events.build("docket.timer.fired", {"timer_id": "t1"}, source="docket"))
 """
 
 __version__ = "0.1.0"

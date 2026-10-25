@@ -42,10 +42,9 @@ from .waker import WakeError
 
 HANDLER = "nod-answer-recorded"
 CATCHUP = "nod-catchup"
-WATCHER = "nod-watcher"
+WATCHER = "nod-watcher"     # retired (S7); its ledger file is still read by `tower nod pending`, for audit
 ANSWER_TYPE = "nod.answer.recorded"
-WATCHER_TYPE = "nod.answer.received"
-WATCHER_NS = "watcher"
+WATCHER_NS = "watcher"      # legacy shadow-pairing rows from before S7; hidden from status
 MODES = ("shadow", "live")
 MAX_ATTEMPTS = 5
 FETCH_TIMEOUT = 2.0
@@ -227,7 +226,7 @@ def _reason(text: str) -> str:
 
 async def _evaluate(event: dict, env: Env) -> tuple[str, dict[str, Any]]:
     """Check, fetch, verify, then wake (live) or log (shadow). Returns (handled|already_admitted, info) or raises."""
-    cfg, log, book = env.cfg, env.log, env.book
+    cfg, log = env.cfg, env.log
     source, event_id = event.get("source") or "", event["id"]
     if cfg.trusted_source and source != cfg.trusted_source:
         raise kit.Drop(f"source {source!r} is not the trusted Nod source")
@@ -268,8 +267,6 @@ async def _evaluate(event: dict, env: Env) -> tuple[str, dict[str, Any]]:
     if cfg.mode == "shadow":
         log.info("shadow wake (not sent)", request_id=rid, revision=revision, session=session, directory=directory,
                  message_id=message_id, text_chars=len(text))
-        log_pair(log, rid, {"event_id": envelope["id"], "info": {"revision": revision}},
-                 book.find(rid, namespace=WATCHER_NS))
         return "handled", extra
     admission = await env.waker.message_session(session, text, message_id=message_id, directory=directory)
     # A 409 for our own id that the waker found in the session is an earlier admission (crash before marking).
@@ -368,30 +365,6 @@ def record_dead_letter(event: dict, env: Env, error: str) -> None:
     env.book.record(event.get("source") or "", event["id"], namespace=env.cfg.mode, ref=ref, attempt=False,
                     state=f"dead_lettered:{_reason(error)}",
                     info={"request_id": ref, "revision": data.get("revision"), "envelope": event, "via": "bus"})
-
-
-def log_pair(log: kit.Log, rid: str, recorded: dict | None, watcher: list[dict]) -> None:
-    log.info(
-        "shadow pairing",
-        request_id=rid,
-        revision=(recorded or {}).get("info", {}).get("revision"),
-        recorded_event_id=(recorded or {}).get("event_id"),
-        watcher_event_ids=[row["event_id"] for row in watcher],
-        matched=bool(recorded and watcher),
-    )
-
-
-def on_watcher_answer(event: dict, env: Env) -> None:
-    """Record the old watcher's event, and pair it with any shadow evaluations for the same request."""
-    rid = (event.get("data") or {}).get("request_id")
-    if not isinstance(rid, str) or not rid:
-        raise kit.Drop("watcher event without request_id")
-    book = env.book
-    book.mark(event["source"], event["id"], namespace=WATCHER_NS, ref=rid, outcome="seen")
-    watcher = book.find(rid, namespace=WATCHER_NS)
-    shadows = [r for r in book.find(rid, namespace="shadow") if r["outcome"] == "handled"]
-    for row in shadows or [None]:
-        log_pair(env.log, rid, row, watcher)
 
 
 # -- journal catch-up -------------------------------------------------------------
@@ -619,6 +592,7 @@ async def deliver(missing: list[dict[str, Any]], envelopes: dict[str, dict[str, 
 
 
 def pending(state_root: Path | str = kit.STATE_ROOT) -> list[str]:
+    """Open request ids in the retired watcher's ledger file, if it is still there (read-only, for audit)."""
     path = Path(os.path.expanduser(str(state_root))) / WATCHER / "requests.json"
     try:
         rows = json.loads(path.read_text())

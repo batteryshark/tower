@@ -322,7 +322,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("pub", help="publish an event")
-    p.add_argument("type", help="event type, e.g. nod.answer.received (subject becomes ev.<type>)")
+    p.add_argument("type", help="event type, e.g. docket.timer.fired (subject becomes ev.<type>)")
     p.add_argument("--data", help="event data as JSON")
     p.add_argument("--source", default="tower/cli", help="event source (default tower/cli)")
     p.add_argument("--subject", help="CloudEvents subject attribute (what the event is about)")
@@ -388,7 +388,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="one-off catch-up: run missing events with seq >= N through the handler in this process")
     q.add_argument("--mode", choices=["shadow", "live"], default="shadow", help="catch-up mode (default shadow)")
     q.set_defaults(func=cmd_nod)
-    q = nod_sub.add_parser("pending", help="open request ids in the old watcher ledger (ids only)")
+    q = nod_sub.add_parser("pending", help="open request ids in the retired watcher ledger, if present (ids only, audit)")
     q.set_defaults(func=cmd_nod)
     q = nod_sub.add_parser("status", help="catch-up cursor, last run, counts by state, rows needing attention")
     q.set_defaults(func=cmd_nod)

@@ -129,30 +129,8 @@ async def test_shadow_computes_but_never_wakes(temp_bus, tmp_path, fake_detail):
         assert row["info"]["message_id"] == message_id_for(event["id"], salt=NAME)
         assert not kit.shared_ledger(tmp_path / "state").bind(NAME).seen(event["source"], event["id"], namespace="live")
         logs = host.test_logs.getvalue()
-        assert "shadow wake (not sent)" in logs and "shadow pairing" in logs
+        assert "shadow wake (not sent)" in logs and "shadow pairing" not in logs
         assert NOD_TOKEN not in logs and SECRET not in logs
-    finally:
-        await host.stop()
-
-
-async def test_shadow_pairs_with_watcher_answer(temp_bus, tmp_path, fake_detail):
-    host = await start_host(temp_bus, tmp_path, fake_detail, "shadow")
-    try:
-        event = answer_event(rid="req_pair")
-        fake_detail["details"][event["id"]] = detail_for(event)
-        await publish(host, event)
-        watcher = events.build("nod.answer.received", {"request_id": "req_pair", "origin": ORIGIN},
-                               source="tower/watcher/nod", subject="req_pair", id="nod-answer-abc")
-        await publish(host, watcher)
-
-        async def done():
-            return stats(host).handled == 2
-        await wait_for(done)
-        pairs = [json.loads(line) for line in host.test_logs.getvalue().splitlines() if '"shadow pairing"' in line]
-        assert pairs[-1]["matched"] is True
-        assert pairs[-1]["request_id"] == "req_pair" and pairs[-1]["revision"] == 2
-        assert pairs[-1]["recorded_event_id"] == event["id"]
-        assert pairs[-1]["watcher_event_ids"] == ["nod-answer-abc"]
     finally:
         await host.stop()
 

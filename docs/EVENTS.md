@@ -9,12 +9,12 @@ event in structured JSON mode: the whole event is the message body, UTF-8 JSON.
 {
   "specversion": "1.0",
   "id": "01a169e8-936b-7fea-887e-545bdb2f899b",
-  "source": "nod",
-  "type": "nod.answer.received",
+  "source": "docket",
+  "type": "docket.timer.fired",
   "time": "2026-10-23T17:56:52.203Z",
-  "subject": "req_123",
+  "subject": "dkt_123",
   "datacontenttype": "application/json",
-  "data": {"request_id": "req_123", "answer": "yes"}
+  "data": {"timer_id": "dkt_123", "name": "check-in"}
 }
 ```
 
@@ -67,8 +67,8 @@ Wildcards for subscribers: `*` matches one token, `>` matches the rest (`ev.gith
 
 | Subject | Published by | Data (main fields) |
 |---|---|---|
-| `ev.nod.request.asked` | anyone asking Nod and wanting a wake-up | `request_id`, `origin_session` |
-| `ev.nod.answer.received` | Tower's Nod watcher | `request_id`, `origin_session`, `answer` |
+| `ev.nod.request.asked` | RETIRED (2026-10-25): replaced by Nod's `ev.nod.answer.recorded` with a private origin | (was `request_id`, `origin`) |
+| `ev.nod.answer.received` | RETIRED (2026-10-25): replaced by Nod's `ev.nod.answer.recorded` with a private origin | (was `request_id`, `origin`, `answer`) |
 | `ev.nod.request.created` | Nod (provisional, from Nod uplift) | `schema_version`, `request_id`, `revision`, `aggregate_status`, `decision_resolution` |
 | `ev.nod.answer.recorded` | Nod (provisional, from Nod uplift) | same, plus `decision_id` (opaque; equals the event id). One per accepted answer, so a per-user request has several. Handler `nod-answer-recorded` |
 | `ev.nod.request.cancelled` | Nod (provisional, from Nod uplift) | same as `request.created` |
