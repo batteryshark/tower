@@ -1,6 +1,6 @@
 # GitHub publisher
 
-`tower.publishers.github` polls followed GitHub repos with the `gh` CLI (logged in as the principal) and publishes
+`tower.publishers.github` polls followed GitHub repos with an authenticated `gh` CLI and publishes
 pull request and push events to the bus. It is read-only on GitHub: it lists open pull requests and reads the
 default-branch ref. It never comments, reviews, labels, stars or pushes.
 
@@ -10,14 +10,14 @@ Followed repos are `github.repos` in `~/.tower/config.toml` (or `~/.tower/config
 
 ```toml
 [github]
-repos = ["MeChen618/AstaPS", "batteryshark/tower"]
+repos = ["owner/repository"]
 ```
 
 ```json
-{"github": {"repos": ["MeChen618/AstaPS"]}}
+{"github": {"repos": ["owner/repository"]}}
 ```
 
-Without a config the default is `["MeChen618/AstaPS"]`. To unfollow, remove the repo from the list; its state stays in
+Without a config no repositories are followed. To unfollow, remove the repo from the list; its state stays in
 the state file and is reused if you follow it again. To start a repo from scratch, delete its entry under `repos` in
 the state file.
 
@@ -49,8 +49,8 @@ fails is logged and skipped; the others still run. `gh=` takes a fake runner for
 
 ## Events
 
-Source `tower/watcher/github`. Qualifiers are the owner and repo, lowercased (`MeChen618/AstaPS` ->
-`mechen618.astaps`). The CloudEvents `subject` is `owner/name#number` for PRs and `owner/name@branch` for pushes.
+Source `tower/watcher/github`. Qualifiers are the owner and repo, lowercased (`Owner/Repository` ->
+`owner.repository`). The CloudEvents `subject` is `owner/name#number` for PRs and `owner/name@branch` for pushes.
 
 | Subject | When | Data |
 |---|---|---|

@@ -1,6 +1,6 @@
 """Poll followed GitHub repos and publish ev.github.* events (tower.publishers.github).
 
-Config ([github] in ~/.tower/config.toml): repos (default ["MeChen618/AstaPS"]), interval seconds (default 120).
+Config ([github] in ~/.tower/config.toml): repos (default []), interval seconds (default 120).
 Read-only on GitHub. State: ~/.tower/state/github.json (shared with `python -m tower.publishers.github`).
 """
 
@@ -17,7 +17,7 @@ async def run(ctx):
     except ImportError:
         ctx.log.warning("disabled", reason="tower.publishers.github is not installed")
         await asyncio.Event().wait()
-    repos = list(ctx.config.get("repos") or ["MeChen618/AstaPS"])
+    repos = list(ctx.config.get("repos") or [])
     interval = max(30, int(ctx.config.get("interval") or 120))
     ctx.log.info("watching", repos=repos, interval=interval)
 

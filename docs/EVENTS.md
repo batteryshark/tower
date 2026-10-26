@@ -56,8 +56,8 @@ ev.<domain>.<noun>.<verb>[.<qualifier>...]
 - `<domain>.<noun>.<verb>` is the event `type`: lowercase tokens of `[a-z0-9_-]`, at least three tokens, verb in the
   past tense (`received`, `opened`, `fired`, `stalled`).
 - Qualifiers narrow a channel so subscribers can filter cheaply (`ev.github.pr.opened.batteryshark.>`). Each qualifier
-  is one token, sanitized: lowercased, any run of other characters becomes `-` (`MeChen618/AstaPS` as two qualifiers
-  `mechen618`, `astaps`). Qualifiers are not part of `type`.
+  is one token, sanitized: lowercased, any run of other characters becomes `-` (`Owner/Repository` as two qualifiers
+  `owner`, `repository`). Qualifiers are not part of `type`.
 - Dead letters: `dlq.<handler>` in the `TOWER_DLQ` stream, each one a `tower.dlq.recorded` event whose data holds
   `handler`, `error` and the original `event`.
 

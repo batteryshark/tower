@@ -32,7 +32,7 @@ from typing import Any, Awaitable, Callable, Iterable
 
 log = logging.getLogger("tower.github")
 
-DEFAULT_REPOS = ["MeChen618/AstaPS"]
+DEFAULT_REPOS = []
 DEFAULT_INTERVAL = 120.0
 DEFAULT_STATE_PATH = "~/.tower/state/github.json"
 CONFIG_PATHS = ("~/.tower/config.toml", "~/.tower/config.json")

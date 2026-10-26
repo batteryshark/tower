@@ -9,8 +9,8 @@ def test_subject_for_plain_type():
 
 def test_subject_for_with_qualifiers_sanitized():
     assert (
-        bus.subject_for("github.pr.opened", ["MeChen618", "AstaPS"])
-        == "ev.github.pr.opened.mechen618.astaps"
+        bus.subject_for("github.pr.opened", ["Owner", "Repository"])
+        == "ev.github.pr.opened.owner.repository"
     )
     assert bus.subject_for("a.b.c", ["Foo/Bar", "x.y", " spaced out ", "ok_1-2"]) == "ev.a.b.c.foo-bar.x-y.spaced-out.ok_1-2"
 

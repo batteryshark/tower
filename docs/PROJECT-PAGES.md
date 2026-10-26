@@ -34,9 +34,9 @@ remain operator-controlled: no universal TOCTOU claim is made against a hostile 
 Exact-file privacy scans remain mandatory; filename checks cannot detect secret content.
 Hidden, secret, token, credential, auth, password and key paths,
 percent encoding, backslashes and parent traversal are rejected even when configured.
-Limits: 100 projects, 100 files/images each, 512KiB per text/JSON, 2MiB per raster/response.
+Limits: 1000 projects, 100 files/images each, 512KiB per text/JSON, 2MiB per raster/response.
 
-## Concrete kit export contract (serialized next slice)
+## Export contract
 
 Kit atomically replaces each sanitized projection using supported Knowledge interfaces;
 Tower only reads it. No private database/auth store scrape. Missing API means
@@ -60,7 +60,7 @@ project records. No runtime manifest or actual private data is shipped here.
   "acceptance":{"project_id":"p_demo","outcome_id":"outcome-2",
     "state":"accepted","request_state":"answered",
     "request_id":"nod-request-id","requested_at":"2026-10-23T17:00:00Z",
-    "reference":"sanitized outcome reference","provenance":"chief-only Nod answer projection",
+    "reference":"sanitized outcome reference","provenance":"authorized Nod answer projection",
     "answer":{"type":"nod.answer","id":"durable-answer-id","request_id":"nod-request-id",
       "project_id":"p_demo","outcome_id":"outcome-2","value":"Accept",
       "answered_at":"2026-10-23T18:00:00Z","reference":"durable answer reference",
@@ -96,7 +96,7 @@ answered request state, request ID, actual answer ID/time, provenance/reference 
 and answer, exact answer.type `nod.answer` and `Accept` / `Not yet` value. Answer.request_id
 must equal acceptance.request_id; request and answer project_id/outcome_id must each match
 the projection and manifest. requested_at <= answered_at <= generated_at is mandatory.
-Authenticity and chief-only issuance remain exporter obligations; Tower validates bindings,
+Authenticity and authorized issuance remain exporter obligations; Tower validates bindings,
 not cryptographic authenticity. No fake historical Nod receipt may be manufactured;
 the exporter must not carry an earlier outcome's answer into a new outcome.
 An unavailable projection omits acceptance. LEAD text never grants acceptance. Acceptance is
@@ -118,16 +118,16 @@ strictly validated as a nonfuture timestamp no later than generated_at; this is 
 other schema extension. Knowledge displays notes/todos from that real API read time.
 Explicit sourced summary text takes priority. A missing field may fall back to a local header
 only if <=100 characters without obvious hashes, IDs or paths. This conservative filter is not
-a plain-language translator: the parent owns templates and source language. Missing values are
+a plain-language translator: the exporter owns templates and source language. Missing values are
 omitted. Full local header and provenance remain under Project details and the selected document.
 Overview has one full-row project link: name, short manifest status, explicit Needs you, and
 relative actual last landing if known. Detail caps the three main sentences at word boundaries
 around100 characters. Updated uses summary.observed_at, never generated_at or file mtime;
 absolute same-host local time is secondary in time tooltips (no script/CSP change).
 Overview uses the oldest known source observation rather than the newest masking stale rows.
-Selected files, including approved-outcome text, are behind a named Read disclosure by default;
-the GET file selection remains in the URL. Feed shows three recent factual events, with remaining
-events behind More activity; technical evidence is collapsed. Empty feed is omitted.
+Selected files render after choosing a file; the GET selection remains in the URL.
+See [Project discovery and freshness](PROJECT-DISCOVERY.md) for current overview,
+pagination, runtime observations and refresh behavior.
 
 ## Automatic refresh adapter
 
@@ -145,20 +145,19 @@ rollback. Native Knowledge is a true-age cache refreshed explicitly in genuine
 agent context; no credentials persisted into background processes. Enqueued clock
 notices are not downstream refresh proof. No runtime adapter is enabled by this source.
 
-## Local validation / rollout
+## Rendering and validation
 
 Run `PYTHONPATH=src <python> -m pytest tests/test_projects.py tests/test_project_validation.py tests/test_viewer.py`.
 Tests create synthetic temporary manifests only. No production fallback fixture exists.
 The layout reuses viewer theme tokens, wraps long text and uses a 390px-compatible grid;
 Markdown supports safe headings, paragraphs, emphasis/strong/inline code, ordered/unordered/task
 lists, tables, fenced code, HTTP(S) links and approved images, not arbitrary HTML or full CommonMark
-extensions. Task checkboxes are disabled, not a write UI. CSP forbids scripts/external images.
-Parent owns manifest/export integration, install/rollback and real tailnet phone screenshots;
-source tests are not evidence of installed acceptance. No live deployment or push here.
+extensions. Task checkboxes are disabled, not a write UI. External images are forbidden;
+project pages permit only the same-origin file-selection script.
 
 ## Supported Knowledge export source (kit-owned, not Tower runtime)
 
-Parent established the maintained OpenChamber agent-tool transport. In an actual inherited
+The exporter uses the OpenChamber agent-tool transport. In an actual inherited
 agent context, read OPENCHAMBER_AGENT_TOOL_URL and OPENCHAMBER_AGENT_TOOL_TOKEN in memory only.
 Validate loopback URL, refuse redirects/remote origin, use bounded timeout/response and POST
 with Bearer token and JSON `{input:{action:"knowledge.list",directory:<explicit approved root>},
