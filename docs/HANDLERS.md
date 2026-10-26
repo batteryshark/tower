@@ -1,22 +1,22 @@
 # Handlers and watchers
 
-Tower runs small files in one process, the handler host (`tower host`, Fleet service `tower-host`). There are two kinds:
+Tower runs small files in one process, the handler host (`tower host`). There are two kinds:
 
 - a **handler** subscribes to channels and reacts to each event (usually by waking an agent);
 - a **watcher** runs a loop that watches the outside world (Nod, GitHub) and publishes events.
 
 The host loads `src/tower/handlers/*.py` and `~/.tower/handlers/*.py` (or `$TOWER_HANDLERS_DIR`). Files starting
 with `_` are skipped. A file that fails to import or is malformed is logged (`load failed`) and skipped; the rest run.
-`fleet restart tower-host` picks up new or changed files.
+Restart the host to pick up new or changed files.
 
 ## A handler
 
 ```python
-# ~/.tower/handlers/docket_fire_note.py
+# ~/.tower/handlers/timer_note.py
 from tower.kit import Drop
 
-NAME = "docket-fire-note"                 # also the durable consumer name and dlq.<NAME>
-SUBSCRIBE = "ev.docket.timer.fired"       # or a list: ["ev.github.pr.opened.>", "ev.github.push.>"]
+NAME = "timer-note"                       # also the durable consumer name and dlq.<NAME>
+SUBSCRIBE = "ev.demo.timer.fired"         # or a list of subjects
 MAX_DELIVER = 5                           # optional (default 5)
 BACKOFF = [5, 30, 120, 600]               # optional, seconds before attempt 2, 3, 4...
 
@@ -85,17 +85,17 @@ finished. To consume events too, `async for event, msg in ctx.subscribe("ev.x.>"
 
 | File | Kind | Does |
 |---|---|---|
-| `nod_catchup.py` (`nod-catchup`) | watcher | PROVISIONAL (Nod uplift). Off unless `TOWER_NOD_CATCHUP=on` (logs `disabled`, makes no Nod call). When on: pages Nod's journal from a durable cursor on start, on bus reconnect and every `catchup_interval` (600 s), and runs every answer not yet terminal through the same path as `nod-answer-recorded`. See "Nod: recovery" below. |
-| `nod_answer_recorded.py` (`nod-answer-recorded`) | handler on `ev.nod.answer.recorded` | Nod answers (replaces the retired `nod-watcher` and `nod-answer-wake`, S7 2026-10-25). Shares `tower.nod.process` with `nod-catchup`. Reads the origin from Nod's detail route (2 s timeout; 404 or no origin drops; 5xx/timeout retries, dead letter after 5; a detail that does not match the event dead-letters), then wakes `origin.session` in `origin.directory` with ids and statuses only, never the answer. `TOWER_NOD_MODE` (env, else config `mode`): `shadow` (default) logs the wake without calling the waker, `live` wakes. Ledger namespaces `live`/`shadow` in `~/.tower/state/ledger.sqlite`. |
+| `nod_catchup.py` (`nod-catchup`) | watcher | Off unless `TOWER_NOD_CATCHUP=on`. When on, pages Nod's journal from a durable cursor on start, on reconnect and every `catchup_interval` (600 s), processing answers through `nod-answer-recorded`. See "Nod: recovery" below. |
+| `nod_answer_recorded.py` (`nod-answer-recorded`) | handler on `ev.nod.answer.recorded` | Reads authenticated answer details, validates the event and notifies its originating session with IDs and statuses. `TOWER_NOD_MODE=shadow` (default) records the intended notification; `live` sends it. State is stored in `~/.tower/state/ledger.sqlite`. |
 | `stall_ping_chief.py` (`stall-ping-chief`) | handler on `ev.lead.delivery.stalled` | reads an operator pointer file (JSON `session`, `directory`; default `~/.chief-of-staff/chief.json`, config `pointer`) fresh and messages the chief session with the stall as DATA |
 | `github_pr_review.py` (`github-pr-review`) | handler on `ev.github.pr.opened.>` | creates `~/.tower/reviews/<owner>-<repo>-pr<N>/` and starts a session there (agent `build`, model `claude-code/claude-sonnet-5-5[1m]`, title `review <owner>/<repo>#<N>`) that reads the PR with `gh pr view/diff` and writes `review.md`. It is told to post nothing to GitHub. |
-| `github_watcher.py` (`github`) | watcher | runs `tower.publishers.github.poll_once` every `interval` s (default 120) on `repos` (default `["MeChen618/AstaPS"]`); see [GITHUB.md](GITHUB.md) |
+| `github_watcher.py` (`github`) | watcher | runs `tower.publishers.github.poll_once` every `interval` s (default 120) on configured `repos` (default empty); see [GITHUB.md](GITHUB.md) |
 
 Config example (`~/.tower/config.toml`):
 
 ```toml
 [github]
-repos = ["MeChen618/AstaPS"]
+repos = ["owner/repository"]
 interval = 120
 
 [github-pr-review]
@@ -179,7 +179,7 @@ tower nod reconcile --after 0          # report journal answers with no terminal
 ```sh
 uv run tower handlers                 # loaded files, state, counters, last error, consumer lag, load errors
 uv run tower dlq                      # all dead letters; tower dlq <NAME> for one handler, --follow to keep tailing
-fleet logs tower-host -f              # JSON lines
+# Host logs are JSON lines on its configured output.
 curl -s http://127.0.0.1:8796/health  # the same as JSON (503 when NATS is disconnected)
 ```
 

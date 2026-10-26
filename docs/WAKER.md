@@ -2,8 +2,8 @@
 
 `tower.waker` is how a handler wakes an agent. It does two things and nothing more:
 message an existing OpenCode session, or start a new one with a named agent.
-Choosing tools, skills, permissions, briefs or a sandbox for the agent is the separate
-agent launch profiles project (PROJECT.md D6). Stdlib only.
+The selected agent's configuration determines its tools, skills and permissions.
+The waker uses the Python standard library.
 
 ## The two calls
 
@@ -43,7 +43,7 @@ instruction (what the agent should do) outside the block. Never put secrets in p
 
 ## Discovery
 
-Same as Docket: URL and password from `~/.local/state/opencode/service.json`, else
+URL and password come from `~/.local/state/opencode/service.json`, else
 `~/.config/opencode/service.json`. Basic auth, user `opencode`. Only a loopback origin
 (127.0.0.1, localhost, ::1) is accepted. The password is never logged or put in an error.
 
@@ -59,8 +59,7 @@ API used (OpenCode 2.x, from the server's `/openapi.json`):
 
 - `message_id` is caller-supplied and must start with `msg_`. Use `message_id_for(event_id, salt)`
   (sha256, so the same event gives the same id; the salt separates two handlers waking on one event).
-  The server returns the original admission for a repeated id and adds nothing (checked live:
-  a redelivery produced one user message).
+  The server returns the original admission for a repeated id and adds nothing.
 - `start_session` keeps a ledger at `~/.tower/state/waker.json` (0600, dir 0700, file-locked):
   `message_id -> {session_id, directory, agent, state}`. It reserves a new session id in the
   ledger *before* creating it, so a crash or retry at any point reuses the same session:
@@ -84,7 +83,7 @@ API used (OpenCode 2.x, from the server's `/openapi.json`):
 ## Limits
 
 - No permissions, tools, skills, sandbox or brief: the session gets whatever its agent has.
-- No OpenChamber-only archive overlay check (Docket has an optional one); only the server's own
+- No OpenChamber-only archive overlay check; only the server's own
   `time.archived` is checked.
 - Does not wait for or read the agent's reply, and does not cancel admissions.
 - Local server only (loopback); a remote OpenCode is out of scope.

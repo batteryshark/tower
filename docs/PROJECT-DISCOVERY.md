@@ -1,4 +1,4 @@
-# Second review source slice
+# Project discovery and freshness
 
 Project pages allow only enumerated `file` IDs (including `knowledge`). The empty
 selection shows a Choose a file prompt. The same-origin static script submits the
@@ -87,8 +87,6 @@ producer reads and checked publication, reserving time under the existing60-seco
 host timeout; no immediate retries. The host result IPC cap alone is84KiB to fit
 1000 maximum-length stale IDs. No general source/content byte cap was raised.
 
-Knowledge remains genuine-context only, with original read age. Unread new
-Knowledge is unavailable, not empty/fresh. No background native authentication,
-dynamic plan enrollment, bus/watcher/history change, new service or scheduler.
-Runtime installation, actual source/content scan, live tailnet screenshots and
-chief acceptance remain integration-owner gates, not source-test outcomes.
+Knowledge retains its original read age. Unread Knowledge is unavailable, not
+empty or fresh. Background refresh does not acquire native authentication or
+automatically enroll additional documents.

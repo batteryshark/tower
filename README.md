@@ -1,89 +1,87 @@
-<img src="assets/tower.png" alt="Cheerful control tower passing messages between tiny robots" width="320">
+<img src="assets/tower.png" alt="A control tower passing messages between robots" width="320">
 
 # Tower
 
-Tower is an event bus for the tools and agents on this machine and tailnet. Anything can publish an event to a
-channel; anything can subscribe to channels with wildcards, live or with replay. It is
-[NATS JetStream](https://docs.nats.io/nats-concepts/jetstream) plus a small Python kit:
+Tower is a self-hosted event bus for local tools and automations. It combines NATS JetStream with a Python library, command-line client, handler host and read-only web viewer, so applications can publish structured events, replay missed messages and process them with retries and dead-letter queues.
 
-- `tower.events`: the event format (CloudEvents 1.0 JSON), see [docs/EVENTS.md](docs/EVENTS.md).
-- `tower.bus`: connect with the token, set up the streams, publish with duplicate protection.
-- `tower` CLI: `pub`, `sub`, `watch`, `streams`, `host`, `handlers`, `dlq`.
-- The handler host: small handler and watcher files with durable consumers, retries and dead letters, see
-  [docs/HANDLERS.md](docs/HANDLERS.md). Waking agents: [docs/WAKER.md](docs/WAKER.md).
-- The live viewer: watch events as they happen at http://127.0.0.1:8796/tower/ or, on the tailnet (phones too),
-  https://<your-mac>.<tailnet>.ts.net:9443/tower/, see [docs/VIEWER.md](docs/VIEWER.md).
+## Requirements
 
-Tower is plumbing only. Real code publishes events (Docket fires, Nod answers, a GitHub watcher); handlers are code
-that subscribe to a channel and act, for example by waking an agent. There is no central router or rules engine.
+- Python 3.11+ and [uv](https://docs.astral.sh/uv/).
+- A running [NATS server](https://docs.nats.io/running-a-nats-service/introduction/installation) with JetStream enabled.
+- OpenSSL for the included server-configuration script.
+- Optional: an authenticated `gh` CLI for GitHub events; a local OpenCode server for session notifications.
+
+## Install
+
+```sh
+git clone https://github.com/batteryshark/tower.git
+cd tower
+uv sync
+uv tool install .
+```
+
+The `tower` command is installed in uv's tool binary directory. You can also run it from the checkout with `uv run tower`.
 
 ## Quick start
 
-Requires the bus to be running (see [docs/OPERATIONS.md](docs/OPERATIONS.md)) and [uv](https://docs.astral.sh/uv/).
+For a new local NATS installation:
 
 ```sh
-uv sync
-uv run tower streams                                   # bus reachable? streams there?
-uv run tower pub demo.hello.sent --data '{"text":"hi"}'
-uv run tower watch --all                                # replay everything, then follow (Ctrl-C)
-uv run tower watch 'ev.github.>' --since 2h             # one domain, last two hours
-uv run tower sub 'ev.>'                                 # live only, no replay
-uv run tower pub github.pr.opened -q batteryshark -q tower --data '{"number":1}'
-                                                        # -> ev.github.pr.opened.batteryshark.tower
-uv run tower watch 'dlq.>'                              # dead letters
+./scripts/setup-nats.sh
+nats-server -c "$HOME/.tower/nats/nats.conf"
 ```
 
-In Python:
-
-```python
-from tower import bus, events
-
-nc = await bus.connect()
-js = nc.jetstream()
-await bus.publish(js, events.build("docket.timer.fired", {"timer_id": "t1"}, source="docket"))
-await nc.close()
-```
-
-More in [examples/](examples/): `publish.py`, `subscribe.py` (durable consumer, the handler pattern), `watch.py`,
-and `nats-cli.sh` for the official `nats` CLI.
-
-## Install the CLI
+Leave the server running. In another terminal:
 
 ```sh
-uv tool install --editable <path-to-tower>   # puts `tower` in ~/.local/bin
-command -v tower                             # ~/.local/bin/tower
+tower streams --ensure
+tower pub demo.hello.sent --data '{"text":"hello"}'
+tower watch 'ev.demo.>' --all
 ```
 
-Editable, so it tracks this checkout; no reinstall after code changes (reinstall only when dependencies change).
-Contract for other tools: `tower` is on PATH; callers accept a configured CLI path that defaults to `tower`
-(e.g. `tower pub demo.cli.check --data '{}'`). Uninstall: `uv tool uninstall tower`.
+`watch` replays matching messages and then follows new ones; Ctrl-C stops it. To run the viewer with only your own handlers, create an empty handler directory and start the host:
 
-## Connecting
+```sh
+mkdir -p "$HOME/.tower/handlers"
+tower host --no-builtin --dir "$HOME/.tower/handlers"
+```
 
-| Variable | Default |
-|---|---|
+Open <http://127.0.0.1:8796/tower/>. Built-in integrations are documented in [Handlers](docs/HANDLERS.md); inspect and configure them before starting the host without `--no-builtin`.
+
+## Configuration
+
+| Variable | Default / purpose |
+| --- | --- |
 | `TOWER_NATS_URL` | `nats://127.0.0.1:4222` |
 | `TOWER_NATS_TOKEN_FILE` | `~/.tower/secrets/nats.token` |
+| `TOWER_NATS_USER`, `TOWER_NATS_PASSWORD_FILE` | Optional user/password-file authentication |
+| `TOWER_NATS_CLIENT_CONFIG` | `~/.tower/nats/client.json`; authentication selection |
+| `TOWER_CONFIG` | Handler settings; otherwise `~/.tower/config.toml` or `config.json` |
+| `TOWER_HANDLERS_DIR` | Custom handler directory, default `~/.tower/handlers` |
+| `TOWER_STATE_DIR` | Persistent handler state, default `~/.tower/state` |
 
-The server listens on loopback only and requires the token. Clients without the token are refused.
+Keep credential files private. `tower auth` reports the selected authentication mode without displaying credentials. See [Operations](docs/OPERATIONS.md) for setup and authentication details.
 
-From another machine on the tailnet: copy the token into a 0600 file there (never into a repo or a command line) and
-point the client at the tailnet name:
-
-```sh
-export TOWER_NATS_URL=nats://<your-mac>.<tailnet>.ts.net:4222
-export TOWER_NATS_TOKEN_FILE=~/.tower/secrets/nats.token
-uv run tower watch
-```
-
-The `nats` CLI takes the same values as `NATS_URL` and `NATS_TOKEN` (see `examples/nats-cli.sh`).
-
-## Development
+## Key commands
 
 ```sh
-uv run pytest                                  # unit tests
-TOWER_INTEGRATION=1 uv run pytest tests/test_integration.py   # against the live bus
+tower --help
+tower streams                         # inspect streams
+tower sub 'ev.>'                       # new events only
+tower watch 'ev.github.>' --since 2h    # replay, then follow
+tower handlers                        # host status
+tower dlq                             # inspect dead letters
 ```
 
-Layout: `src/tower/` (library and CLI), `tests/`, `docs/`, `examples/`, `deploy/` (server config template),
-`scripts/setup-nats.sh` (installs the config and token under `~/.tower`).
+## Documentation
+
+- [Event format and subjects](docs/EVENTS.md)
+- [Handlers, retries and integrations](docs/HANDLERS.md)
+- [Server operations](docs/OPERATIONS.md)
+- [Web viewer](docs/VIEWER.md) and [project pages](docs/PROJECT-PAGES.md)
+- [GitHub publisher](docs/GITHUB.md) and [OpenCode session notifications](docs/WAKER.md)
+- [Python examples](examples/)
+
+## License
+
+[MIT](LICENSE).

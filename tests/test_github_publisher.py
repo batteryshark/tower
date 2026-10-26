@@ -11,7 +11,7 @@ import pytest
 from tower import bus, events
 from tower.publishers import github as G
 
-REPO = "MeChen618/AstaPS"
+REPO = "Owner/Repository"
 
 
 def pr(number, sha, title="t", created="2026-10-23T00:00:00Z"):
@@ -77,7 +77,7 @@ async def test_baseline_publishes_nothing(state_path):
     gh, pub = FakeGh([pr(1, "s1"), pr(2, "s2")]), Recorder()
     assert await G.poll_once([REPO], state_path, pub, gh=gh) == []
     assert pub.events == []
-    state = json.loads(state_path.read_text())["repos"]["mechen618/astaps"]
+    state = json.loads(state_path.read_text())["repos"]["owner/repository"]
     assert state["baselined"] and state["head"] == "a" * 40
     assert set(state["prs"]) == {"1", "2"}
     assert stat.S_IMODE(os.stat(state_path).st_mode) == 0o600
@@ -92,7 +92,7 @@ async def test_new_pr_sha_change_and_push(state_path):
     out = await G.poll_once([REPO], state_path, pub, gh=gh)
     assert [(e["type"], e["data"]["number"]) for e in out] == [(G.PR_OPENED, 2)]
     t, data, quals, eid = pub.events[0]
-    assert bus.subject_for(t, quals) == "ev.github.pr.opened.mechen618.astaps"
+    assert bus.subject_for(t, quals) == "ev.github.pr.opened.owner.repository"
     assert data["head_sha"] == "s2" and data["repo"] == REPO and data["base"] == "main"
     assert set(data) >= {"repo", "number", "title", "url", "author", "head_sha", "base", "created_at", "draft"}
 
@@ -105,7 +105,7 @@ async def test_new_pr_sha_change_and_push(state_path):
     assert len(out) == 1 and out[0]["type"] == G.BRANCH_PUSHED
     push = out[0]["data"]
     assert (push["branch"], push["before"], push["after"]) == ("main", "a" * 40, "b" * 40)
-    assert bus.subject_for(out[0]["type"], out[0]["qualifiers"]) == "ev.github.branch.pushed.mechen618.astaps"
+    assert bus.subject_for(out[0]["type"], out[0]["qualifiers"]) == "ev.github.branch.pushed.owner.repository"
 
 
 async def test_unchanged_poll_uses_etags_and_publishes_nothing(state_path):

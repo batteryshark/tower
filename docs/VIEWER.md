@@ -4,7 +4,7 @@ A read-only page that shows bus events as they happen. The handler host serves i
 
 | Where | URL |
 |---|---|
-| This Mac (OpenChamber browser panel or any browser) | http://127.0.0.1:8796/tower/ |
+| Local browser | http://127.0.0.1:8796/tower/ |
 | Any device on the tailnet, including a phone | https://<your-mac>.<tailnet>.ts.net:9443/tower/ |
 
 On a phone, open the tailnet URL in Safari and use Add to Home Screen. The page reconnects by itself after the phone
@@ -68,16 +68,15 @@ tower pub demo.viewer.check --data '{"note":"hello viewer"}'
 tailscale serve --bg --https=9443 --set-path=/tower http://127.0.0.1:8796/tower
 ```
 
-Tailnet only (Serve, not Funnel). Any tailnet device the ACLs allow can read the stream, the same as `/galley` and
-`/floating-voice`; publishers keep secrets out of events (docs/EVENTS.md). Rollback, which removes only this path:
+Tailnet only (Serve, not Funnel). Any tailnet device the ACLs allow can read the stream;
+publishers must keep secrets out of events. To remove only this path:
 
 ```sh
 tailscale serve --https=9443 --set-path=/tower off
 ```
 
 Do **not** use `tailscale serve --https=9443 off`, which the serve command suggests: it removes every 9443 route.
-After either command, check `tailscale serve status`: the other 9443 routes (`/`, `/galley`, `/chief-images`,
-`/floating-voice`) must be unchanged.
+After either command, check `tailscale serve status` to confirm any other routes are unchanged.
 
 ## Tests
 
